@@ -145,6 +145,35 @@ The drone IP and port can be overridden at build time:
 RUST_LOG="info" GATEWAY_IP=192.168.4.1 UDP_PORT=4444 cargo run --release
 ```
 
+## Accelerometer Calibration
+
+flash calibration:
+
+```sh
+DEFMT_LOG="debug" LOG_RATE_MS=100 AP_PASSWORD="testtest" cargo flash-c3 --features calibrate
+```
+
+You can then either leave the quad plugged in or unplug and calibrate using the wifi outputs, either way, you need to connect ground_control
+
+after the `esp-quad` network shows up on wifi, connect to it and fire up ground control in calibration mode:
+
+```sh
+~/dev/rust/drone_embassy calibrate_on_wifi
+❯ RUST_LOG="info" cargo gc -- --calibrate
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `ground_control/target/x86_64-unknown-linux-gnu/release/ground_control --calibrate`
+2026-07-19T04:19:17.472588Z  INFO ground_control: connected to 192.168.4.1:4444 - waiting to start calibration
+2026-07-19T04:19:17.595122Z  WARN ground_control: place: level
+2026-07-19T04:19:32.976684Z  WARN ground_control: place: front side up
+2026-07-19T04:19:48.332827Z  WARN ground_control: place: back side up
+2026-07-19T04:20:03.798211Z  WARN ground_control: place: right side up
+2026-07-19T04:20:19.373504Z  WARN ground_control: place: left side up
+2026-07-19T04:20:34.615814Z  WARN ground_control: place: upside down
+2026-07-19T04:20:50.079828Z  INFO ground_control: === CALIBRATION COMPLETE - saved ===
+```
+
+follow the instructions and tilt the drone around the axis to get readings. The readings are saved in non-volatile flash memory on the esp32.
+
 ## Testing
 
 Unit tests live in `libs`, the crate shared between `firmware` and `ground_control` that defines the control/telemetry packet wire formats. It's the only crate that can build for the host, `firmware` can't (esp-hal's build script refuses to build for a non-embedded target), so there's nothing to run tests against there yet.

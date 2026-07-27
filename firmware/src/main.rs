@@ -131,8 +131,9 @@ async fn main(spawner: Spawner) {
     .into_async();
 
     // Wait for ICM20948 to power up before init
-    Timer::after_millis(500).await;
+    Timer::after_millis(1000).await;
 
+    // normal run scenario
     #[cfg(not(any(feature = "calibrate", feature = "visualize")))]
     {
         let int_pin = gpio::Input::new(peripherals.GPIO6, gpio::InputConfig::default());
@@ -149,22 +150,30 @@ async fn main(spawner: Spawner) {
         .await;
     }
 
+    // calibrate and write to nvs
     #[cfg(feature = "calibrate")]
     {
         // ICM20948
         let mut sensor = Sensor::init_icm20948(i2c)
             .await
             .expect("ICM20948 init failed");
-        let accel_bias = sensor.run_calibration().await;
-
-        let mut flash_storage = esp_storage::FlashStorage::new(peripherals.FLASH);
-        let saved = calibration_storage::store_accel_calibration(&mut flash_storage, &accel_bias);
-        let mode = if saved {
-            defmt::info!("calibration saved: {}", defmt::Debug2Format(&accel_bias));
-            libs::calibrate::CalibrationMode::Ended
-        } else {
-            defmt::error!("failed to save calibration to flash");
-            libs::calibrate::CalibrationMode::Failed
+        let mode = match sensor.run_calibration().await {
+            Some(accel_bias) => {
+                let mut flash_storage = esp_storage::FlashStorage::new(peripherals.FLASH);
+                let saved =
+                    calibration_storage::store_accel_calibration(&mut flash_storage, &accel_bias);
+                if saved {
+                    defmt::info!("calibration saved: {}", defmt::Debug2Format(&accel_bias));
+                    libs::calibrate::CalibrationMode::Ended
+                } else {
+                    defmt::error!("failed to save calibration to flash");
+                    libs::calibrate::CalibrationMode::Failed
+                }
+            }
+            None => {
+                defmt::error!("calibration aborted, nothing to save");
+                libs::calibrate::CalibrationMode::Failed
+            }
         };
         wifi::calibrate::EVENTS
             .publisher()
@@ -173,6 +182,7 @@ async fn main(spawner: Spawner) {
             .await;
     }
 
+    // run the visualizer (just dump to stdout)
     #[cfg(feature = "visualize")]
     {
         let int_pin = gpio::Input::new(peripherals.GPIO6, gpio::InputConfig::default());

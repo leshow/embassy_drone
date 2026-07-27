@@ -64,10 +64,10 @@ fn crc_16(buf: &[u8]) -> u16 {
 }
 
 // locates the nvs partition and hands a FlashRegion scoped to it to f
-fn with_nvs_region<R>(
-    flash: &mut FlashStorage<'_>,
-    f: impl FnOnce(&mut partitions::FlashRegion<'_, FlashStorage<'_>>) -> R,
-) -> Option<R> {
+fn with_nvs_region<R, F>(flash: &mut FlashStorage<'_>, f: F) -> Option<R>
+where
+    F: FnOnce(&mut partitions::FlashRegion<'_, FlashStorage<'_>>) -> R,
+{
     let mut table_buf = [0u8; partitions::PARTITION_TABLE_MAX_LEN];
     let table = partitions::read_partition_table(flash, &mut table_buf).ok()?;
     let entry = table

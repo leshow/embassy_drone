@@ -1,11 +1,15 @@
 use std::io::ErrorKind;
-use std::{net::UdpSocket, thread, time::Duration};
+use std::{
+    net::{SocketAddr, UdpSocket},
+    thread,
+    time::Duration,
+};
 
 use gilrs::{Axis, Button, Event, EventType, Gilrs};
 #[cfg(feature = "telemetry")]
-use libs::telemetry::{TELEMETRY_SIZE, TelemetryPacket};
+use libs::telemetry::{TelemetryPacket, TELEMETRY_SIZE};
 use libs::{
-    calibrate::{CALIBRATION_SIZE, CalibrationMode},
+    calibrate::{CalibrationMode, CALIBRATION_SIZE},
     control::ControlPacket,
 };
 use tracing::{error, info, warn};
@@ -25,10 +29,7 @@ fn main() -> anyhow::Result<()> {
 
     loop {
         let (ip, port) = (libs::get_ip(), libs::get_port());
-        let socket = match UdpSocket::bind("0.0.0.0:0").and_then(|s| {
-            s.connect((ip, port))?;
-            Ok(s)
-        }) {
+        let socket = match UdpSocket::bind("0.0.0.0:0") {
             Ok(s) => {
                 info!("connected to {}:{}", ip, port);
                 // short timeout so a missing telemetry reply doesn't stall the input loop
@@ -88,7 +89,7 @@ fn main() -> anyhow::Result<()> {
                     _ => {}
                 }
             }
-            if let Err(e) = socket.send(&pkt.to_bytes()) {
+            if let Err(e) = socket.send_to(&pkt.to_bytes(), (ip, port)) {
                 info!("send error: {e}");
                 break 'inner;
             }
@@ -96,8 +97,8 @@ fn main() -> anyhow::Result<()> {
             #[cfg(feature = "telemetry")]
             {
                 let mut tbuf = [0u8; TELEMETRY_SIZE];
-                match socket.recv(&mut tbuf) {
-                    Ok(n) if n == TELEMETRY_SIZE => {
+                match socket.recv_from(&mut tbuf) {
+                    Ok((n, a)) if n == TELEMETRY_SIZE && a == SocketAddr::from((ip, port)) => {
                         if let Some(t) = TelemetryPacket::from_bytes(&tbuf) {
                             if last_telemetry != Some(t) {
                                 #[cfg(not(feature = "telemetry-verbose"))]
@@ -113,7 +114,7 @@ fn main() -> anyhow::Result<()> {
                                 );
                                 #[cfg(feature = "telemetry-verbose")]
                                 let msg = format!(
-                                    "telemetry: roll={:.1} pitch={:.1} yaw={:.1} armed={} failsafe={} fifo_overflow={} motors={:?} gyro={:?}",
+                                    "telemetry: roll={:.1} pitch={:.1} yaw={:.1} armed={} failsafe={} fifo_overflow={} motors={:?} gyro={:?} torques={:?} gyro_bias={:?} dt={:.4} accel={:?}",
                                     t.roll,
                                     t.pitch,
                                     t.yaw,
@@ -121,7 +122,11 @@ fn main() -> anyhow::Result<()> {
                                     t.failsafe(),
                                     t.fifo_overflow(),
                                     t.motors,
-                                    t.gyro
+                                    t.gyro,
+                                    t.torques,
+                                    t.gyro_bias,
+                                    t.dt,
+                                    t.accel
                                 );
 
                                 if t.fifo_overflow() {

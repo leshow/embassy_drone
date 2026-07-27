@@ -91,11 +91,9 @@ impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
                 })
                 .await?;
             // 500deg/s gives finer resolution than 2000dps for stable hover corrections;
-            // Hz51 DLPF matches the DMP path's filtering so the rate PID's D-term
-            // behaves the same regardless of which sensor source feeds it
             driver
                 .configure_gyroscope(GyroConfig {
-                    full_scale: GyroFullScale::Dps500,
+                    full_scale: GyroFullScale::Dps1000,
                     dlpf: GyroDlpf::Hz197,
                     dlpf_enable: true,
                     sample_rate_div: 1,
@@ -210,7 +208,7 @@ impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
     /// orientation puts a given axis at +1g and whichever puts it at -1g (not necessarily
     /// "level") together give that axis's bias (midpoint) and scale (half the swing) - no
     /// single orientation needs to be precisely level.
-    pub async fn run_calibration(&mut self) -> crate::flight::AccelBias {
+    pub async fn run_calibration(&mut self) -> Option<crate::flight::AccelBias> {
         use libs::calibrate::CalibrationMode;
 
         const SAMPLES: u32 = 1000;
@@ -257,16 +255,27 @@ impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
             embassy_time::Timer::after_secs(POSE_HOLD_SECS).await;
 
             let mut sum = Vector3::zeros();
+            let mut successful: u32 = 0;
             for _ in 0..SAMPLES {
                 match self.driver.read_accelerometer().await {
-                    Ok(a) => sum += Vector3::new(a.x, a.y, a.z),
+                    Ok(a) => {
+                        sum += Vector3::new(a.x, a.y, a.z);
+                        successful += 1;
+                    }
                     Err(e) => defmt::error!(
                         "accel read error during calibration: {}",
                         defmt::Debug2Format(&e)
                     ),
                 }
             }
-            let avg = sum / SAMPLES as f32;
+            if successful == 0 {
+                defmt::error!(
+                    "calibration pose {} got zero successful reads, aborting calibration",
+                    pose.name()
+                );
+                return None;
+            }
+            let avg = sum / successful as f32;
 
             if avg.x > acc_max.x {
                 acc_max.x = avg.x;
@@ -300,10 +309,10 @@ impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
             );
         }
 
-        crate::flight::AccelBias {
+        Some(crate::flight::AccelBias {
             bias: (acc_max + acc_min) / 2.0,
             scale: (acc_max - acc_min) / 2.0,
-        }
+        })
     }
 }
 

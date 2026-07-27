@@ -13,23 +13,34 @@ pub const RAD_TO_DEG: f32 = 180. / core::f32::consts::PI;
 pub const DEG_TO_RAD: f32 = core::f32::consts::PI / 180.;
 
 const ALPHA_DEFAULT: f32 = 0.98; // complementary filter: trust gyro 98%, accel 2%
-const BETA_DEFAULT: f32 = 0.1; // Madgwick beta gain
-const KP_DEFAULT: f32 = 0.74; // Mahony proportional gain (matches uf-ahrs default)
-const KI_DEFAULT: f32 = 0.0012; // Mahony integral gain (matches uf-ahrs default)
+// Madgwick beta gain - lower than the library default (0.1, tuned for fast convergence) to cut
+// how much thrust-induced accel noise bleeds into the attitude estimate mid-flight. Start here,
+// halve toward ~0.015 if it still drifts; don't chase it toward ~0 or you trade accel noise for
+// uncorrected gyro-integration drift instead
+const BETA_DEFAULT: f32 = 0.1;
+// Mahony gains matching Betaflight's armed defaults (imu_dcm_kp=2500/10000, imu_dcm_ki=0) rather
+// than uf-ahrs's own crate defaults (0.74/0.0012)
+// ki=0 means no gyro bias learning until explicitly enabled
+const KP_DEFAULT: f32 = 0.25;
+const KI_DEFAULT: f32 = 0.0;
+// original uf-ahrs lib defaults:
+// const KP_DEFAULT: f32 = 0.74; // Mahony kp
+// const KI_DEFAULT: f32 = 0.0012; // Mahony ki
 const SAMPLE_PERIOD_DEFAULT: f32 = 0.001; // 1000 Hz default
 
 /// Sensor fusion
 /// F - filter type
 /// S - phantom type for sensor
 ///
+/// (depends on how you mounted sensor)
 /// ```
-///         +Y (forward)
+///         +X (forward)
 ///          ↑
 ///          |
-/// -X ------+------ +X (right)
+/// -Y ------+------ +Y (right)
 ///          |
 ///          ↓
-///         -Y (back)
+///         -X (back)
 ///
 /// +Z points UP out of the chip surface
 /// -Z points DOWN into the desk
@@ -212,12 +223,14 @@ impl<S> FusionBuilder<S, Vqf> {
 /// - **`kp`** — proportional gain: how aggressively the filter pulls the
 ///   estimated orientation toward the gravity/field reference each step.
 ///   Higher values respond faster to disturbances but amplify vibration noise.
-///   Typical range: `0.1` – `2.0`. Default: `0.74`.
+///   Typical range: `0.1` – `2.0`. Default: `0.25` (Betaflight's armed `imu_dcm_kp`).
 ///
 /// - **`ki`** — integral gain: how quickly the filter accumulates a gyroscope
 ///   bias correction term. A non-zero `ki` lets the filter learn and cancel a
 ///   constant drift offset over time. Set to `0.0` to disable bias estimation.
-///   Typical range: `0.0` – `0.01`. Default: `0.0012`.
+///   Left off by default here since `BiasTracker` (flight.rs) already learns gyro
+///   bias continuously - a second learner on the same signal would be redundant.
+///   Typical range: `0.0` – `0.01`. Default: `0.0`.
 ///
 /// # Example
 /// ```rust
@@ -233,7 +246,7 @@ impl<S> FusionBuilder<S, Mahony> {
     ///
     /// Controls how strongly accelerometer (and magnetometer) feedback corrects
     /// the orientation estimate each step. Higher values converge faster but are
-    /// more sensitive to sensor noise and vibration. Default: `0.74`.
+    /// more sensitive to sensor noise and vibration. Default: `0.25`.
     pub fn kp(mut self, kp: f32) -> Self {
         self.kp = kp;
         self
@@ -243,7 +256,7 @@ impl<S> FusionBuilder<S, Mahony> {
     ///
     /// Drives a slowly-accumulating gyroscope bias correction. A non-zero value
     /// lets the filter remove a persistent drift offset learned over time.
-    /// Set to `0.0` to disable bias estimation entirely. Default: `0.0012`.
+    /// Set to `0.0` to disable bias estimation entirely. Default: `0.0`.
     pub fn ki(mut self, ki: f32) -> Self {
         self.ki = ki;
         self
@@ -571,7 +584,10 @@ impl Fusion<ICM20948, Mahony> {
     ) -> UnitQuaternion<f32> {
         let dt = Duration::from_secs_f32(dt.max(0.0001));
         let current_q = self.filter.inner.orientation();
+        // new_with_orientation zeroes `bias`, so we've got to carry it through for the next tick
+        let bias = self.filter.inner.bias;
         self.filter.inner = UfMahony::new_with_orientation(dt, self.filter.params, current_q);
+        self.filter.inner.bias = bias;
         self.filter.inner.update(g, a, m)
     }
 
@@ -580,7 +596,9 @@ impl Fusion<ICM20948, Mahony> {
     pub fn update_imu(&mut self, dt: f32, a: Vector3<f32>, g: Vector3<f32>) -> UnitQuaternion<f32> {
         let dt = Duration::from_secs_f32(dt.max(0.0001));
         let current_q = self.filter.inner.orientation();
+        let bias = self.filter.inner.bias;
         self.filter.inner = UfMahony::new_with_orientation(dt, self.filter.params, current_q);
+        self.filter.inner.bias = bias;
         self.filter.inner.update_imu(g, a)
     }
 }
@@ -591,7 +609,9 @@ impl Fusion<MPU6050, Mahony> {
     pub fn update_imu(&mut self, dt: f32, a: Vector3<f32>, g: Vector3<f32>) -> UnitQuaternion<f32> {
         let dt = Duration::from_secs_f32(dt.max(0.0001));
         let current_q = self.filter.inner.orientation();
+        let bias = self.filter.inner.bias;
         self.filter.inner = UfMahony::new_with_orientation(dt, self.filter.params, current_q);
+        self.filter.inner.bias = bias;
         self.filter.inner.update_imu(g, a)
     }
 }

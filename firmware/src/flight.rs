@@ -18,7 +18,25 @@ use crate::{
 // publishes a telemetry snapshot for the wifi udp_task to reply with on the next control packet.
 // called once per loop iteration, from whichever exit point (early continue or full mix) is
 // actually taken, so telemetry is only ever built once per tick.
-#[cfg(feature = "telemetry")]
+#[cfg(all(feature = "telemetry", not(feature = "telemetry-verbose")))]
+async fn publish_telemetry(
+    euler: (f32, f32, f32),       // (roll, pitch, yaw) radians
+    motors: (u16, u16, u16, u16), // fl fr rl rr
+    armed: bool,
+    failsafe: bool,
+) {
+    let roll_deg = euler.0 * fusion::RAD_TO_DEG;
+    let pitch_deg = euler.1 * fusion::RAD_TO_DEG;
+    let yaw_deg = euler.2 * fusion::RAD_TO_DEG;
+
+    let pkt = TelemetryPacket::new(roll_deg, pitch_deg, yaw_deg, motors, armed, failsafe);
+    *wifi::TELEMETRY.lock().await = Some((pkt, Instant::now()));
+}
+
+// publishes a telemetry snapshot for the wifi udp_task to reply with on the next control packet.
+// called once per loop iteration, from whichever exit point (early continue or full mix) is
+// actually taken, so telemetry is only ever built once per tick.
+#[cfg(feature = "telemetry-verbose")]
 #[allow(clippy::too_many_arguments)]
 async fn publish_telemetry(
     euler: (f32, f32, f32),       // (roll, pitch, yaw) radians
@@ -26,19 +44,18 @@ async fn publish_telemetry(
     armed: bool,
     failsafe: bool,
     gyro: Vector3<f32>,
+    torques: Vector3<f32>,   // roll/pitch/yaw PID output before mixing
+    gyro_bias: Vector3<f32>, // current BiasTracker estimate, zero on the DMP path
+    dt: f32,                 // seconds since the previous loop tick
+    accel: Vector3<f32>,     // bias + mount-trim corrected accel in g, zero on the DMP path
 ) {
     let roll_deg = euler.0 * fusion::RAD_TO_DEG;
     let pitch_deg = euler.1 * fusion::RAD_TO_DEG;
     let yaw_deg = euler.2 * fusion::RAD_TO_DEG;
 
-    #[cfg(not(feature = "telemetry-verbose"))]
-    let _ = &gyro;
-
-    #[cfg(not(feature = "telemetry-verbose"))]
-    let pkt = TelemetryPacket::new(roll_deg, pitch_deg, yaw_deg, motors, armed, failsafe);
-    #[cfg(feature = "telemetry-verbose")]
-    let pkt = TelemetryPacket::new(roll_deg, pitch_deg, yaw_deg, motors, armed, failsafe, gyro);
-
+    let pkt = TelemetryPacket::new(
+        roll_deg, pitch_deg, yaw_deg, motors, armed, failsafe, gyro, torques, gyro_bias, dt, accel,
+    );
     *wifi::TELEMETRY.lock().await = Some((pkt, Instant::now()));
 }
 
@@ -49,18 +66,170 @@ const GYRO_SCALE: f32 = 2000.0 * fusion::DEG_TO_RAD / 32768.0; // i16 → rad/s
 // max roll/pitch command from stick (+/- 25 deg)
 const MAX_TILT_RAD: f32 = 25.0 * fusion::DEG_TO_RAD;
 
+#[cfg(not(feature = "dmp"))]
+pub(crate) mod filters {
+    use nalgebra::Vector3;
+
+    use crate::fusion;
+
+    // IMU mounting tilt relative to the frame, measured at rest with the frame level (see the
+    // "fusion" debug log's roll/pitch) - per-axis accel bias/scale calibration can't correct a
+    // whole-body mounting rotation, only this can. Pitch isn't corrected: it sits within +/-0.1 deg
+    // of zero at rest across many samples, which is noise, not a real offset. Only applied on the
+    // software-fusion path - the DMP does its own on-chip fusion from uncorrected raw readings.
+    pub(crate) const MOUNT_TILT_ROLL_RAD: f32 = 1.15 * fusion::DEG_TO_RAD;
+
+    // cutoff for the gyro rate filter and the rate PIDs' D-term filter - matches flix's
+    // ratesFilter/RATES_D_LPF_ALPHA, both ~40 Hz. Bench testing (no motors spinning) couldn't
+    // surface the need for this - real prop/motor vibration lands well inside this band and was
+    // feeding straight into the rate loop unfiltered, confirmed by real-flight logs showing motor
+    // output saturating (0 <-> max) once real thrust builds up, despite a clean low-throttle ramp
+    pub(crate) const RATE_LPF_HZ: f32 = 40.0;
+
+    // same idea, applied to accel instead of gyro rate - matches betaflight's acceleration.c
+    // pt2Filter default (accLpfCutHz=25). a single-pole filter at 40 Hz still left real prop
+    // vibration corrupting most samples - see Lpf3::new_two_pole for the steeper two-stage filter
+    // this needs to hit 25 Hz cleanly
+    pub(crate) const ACCEL_LPF_HZ: f32 = 25.0;
+
+    // accel norm outside this band means the reading isn't (close to) pure gravity - real
+    // vibration or motion is mixed in, so its direction can't be trusted as a "down" reference
+    // this tick. matches betaflight's imuIsAccelerometerHealthy() (0.9g-1.1g) - confirmed on our
+    // own hardware tonight: clean readings sit within ~1% of 1g, corrupted ones swing far outside
+    // this band (measured as low as 0.145g, as high as 1.944g during real vibration)
+    pub(crate) const ACCEL_HEALTHY_MIN: f32 = 0.9;
+    pub(crate) const ACCEL_HEALTHY_MAX: f32 = 1.1;
+
+    // discrete low-pass filter gain for a given cutoff and this tick's dt - matches flix's
+    // LowPassFilter::setCutOffFrequency. Recomputed every tick since dt isn't fixed (interrupt
+    // driven loop, not a hard real-time scheduler)
+    pub(crate) fn lpf_alpha(cutoff_hz: f32, dt: f32) -> f32 {
+        1.0 - libm::expf(-2.0 * core::f32::consts::PI * cutoff_hz * dt)
+    }
+
+    // per-stage cutoff correction for a two-pole (PT2) cascade - matches betaflight's
+    // CUTOFF_CORRECTION_PT2 (1/sqrt(2^(1/2)-1)). without this, cascading two PT1 stages at the same
+    pub(crate) const CUTOFF_CORRECTION_PT2: f32 = 1.553_774;
+
+    // low-pass filter over a Vector3 signal - shared by the gyro rate filter and the accel filter
+    // below. matches flix's ratesFilter / betaflight's pt1Filter for the single-pole case; accel
+    // needs steeper rolloff so it opts into a second cascaded stage - see new_two_pole
+    pub(crate) struct Lpf3 {
+        state: Vector3<f32>,
+        stage1: Vector3<f32>,
+        two_pole: bool,
+        initialized: bool,
+        cutoff_hz: f32,
+    }
+
+    #[cfg(not(feature = "dmp"))]
+    impl Lpf3 {
+        pub(crate) fn new(cutoff_hz: f32) -> Self {
+            Self {
+                state: Vector3::zeros(),
+                stage1: Vector3::zeros(),
+                two_pole: false,
+                initialized: false,
+                cutoff_hz,
+            }
+        }
+
+        // two cascaded PT1 stages sharing one gain - matches betaflight's pt2Filter, -40dB/decade
+        // instead of -20dB/decade. cutoff_hz gets corrected (CUTOFF_CORRECTION_PT2) before computing
+        // that gain so the cascade's actual -3dB point still lands at cutoff_hz, not higher
+        pub(crate) fn new_two_pole(cutoff_hz: f32) -> Self {
+            Self {
+                two_pole: true,
+                ..Self::new(cutoff_hz)
+            }
+        }
+
+        pub(crate) fn update(&mut self, input: Vector3<f32>, dt: f32) -> Vector3<f32> {
+            if !self.initialized {
+                self.state = input;
+                self.stage1 = input;
+                self.initialized = true;
+                return input;
+            }
+            if self.two_pole {
+                let alpha = lpf_alpha(self.cutoff_hz * CUTOFF_CORRECTION_PT2, dt);
+                self.stage1 += alpha * (input - self.stage1);
+                self.state += alpha * (self.stage1 - self.state);
+            } else {
+                self.state += lpf_alpha(self.cutoff_hz, dt) * (input - self.state);
+            }
+            self.state
+        }
+    }
+}
+
+/// AccelBias
+///
+/// One-time accelerometer bias + scale correction, computed by the 6-orientation tumble
+/// calibration (behind `--features calibrate`) and loaded from flash at boot - see
+/// `calibration_storage`. Unlike gyro bias this isn't re-learned continuously; accel bias
+/// mostly comes from IMU mounting tilt and silicon offset, both fixed for a given build.
+/// Needed in all builds (not just non-DMP): `run_control`'s signature takes one unconditionally,
+/// even though the DMP path leaves it unused (DMP fuses from uncorrected raw readings instead).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AccelBias {
+    pub bias: Vector3<f32>,
+    pub scale: Vector3<f32>,
+}
+
+impl Default for AccelBias {
+    fn default() -> Self {
+        Self {
+            bias: Vector3::zeros(),
+            scale: Vector3::new(1.0, 1.0, 1.0),
+        }
+    }
+}
+
+impl AccelBias {
+    // matches flix's apply step exactly: acc = (acc - accBias) / accScale
+    fn apply(&self, accel: Vector3<f32>) -> Vector3<f32> {
+        (accel - self.bias).component_div(&self.scale)
+    }
+}
+
 // outer loop P gains
-const ANGLE_P_ROLL_PITCH: f32 = 6.0; // flix 6.0
-const ANGLE_P_YAW: f32 = 2.0; // flix 3.0
+const ANGLE_P_ROLL_PITCH: f32 = 4.0; // flix 6.0
+const ANGLE_P_YAW: f32 = 0.0; // flix 3.0
 
 // inner loop
 const RATE_KP_ROLL_PITCH: f32 = 0.05; // flix 0.05
-const RATE_KI_ROLL_PITCH: f32 = 0.1; // flix 0.2
+const RATE_KI_ROLL_PITCH: f32 = 0.3; // flix 0.2 was set to 0.1
 const RATE_KD_ROLL_PITCH: f32 = 0.001; // flix 0.001
 
-const RATE_KP_YAW: f32 = 0.2; // flix 0.3
+const RATE_KP_YAW: f32 = 0.0; // flix 0.3 was set to 0.2
 const RATE_KI_YAW: f32 = 0.0;
 const RATE_KD_YAW: f32 = 0.0;
+
+const INTEGRAL_LIMIT: f32 = 0.3;
+const BETA_FILTER: f32 = 0.05;
+// per-second decay on the rate PIDs' integral term - without this, any permanent small error
+// (mounting tolerance, an uneven resting surface - there's always something) eventually winds
+// the integral to integral_limit given enough time, no matter how small the error is. With
+// decay, a persistent error settles at an equilibrium of error/RATE_INTEGRAL_LEAK instead,
+// while a genuinely larger disturbance still gets proportionally more integral authority
+const RATE_INTEGRAL_LEAK: f32 = 1.0;
+
+// outer loop angle error deadband - a resting tilt under this is mounting tolerance, not
+// something worth actively fighting. subtracts the band rather than clamping to it, so there's
+// no discontinuity in commanded rate right at the edge. roll/pitch only: yaw can't wind up
+// (RATE_KI_YAW = 0) and has its own heading-hold handling already
+const ANGLE_DEADBAND_RAD: f32 = 0.5 * fusion::DEG_TO_RAD;
+
+fn deadband(x: f32, band: f32) -> f32 {
+    if x > band {
+        x - band
+    } else if x < -band {
+        x + band
+    } else {
+        0.0
+    }
+}
 
 // max angle any single DMP sample can plausibly rotate by since the last accepted sample
 #[cfg(feature = "dmp")]
@@ -89,10 +258,18 @@ struct Pid {
     prev_error: f32,
     /// anti-windup clamp — keeps integral from growing unbounded
     integral_limit: f32,
+    /// per-second decay applied to the integral before adding this tick's error - see
+    /// RATE_INTEGRAL_LEAK. A persistent error settles at error/leak instead of climbing to
+    /// integral_limit regardless of how small it is
+    leak: f32,
+    /// low-pass filter state for the derivative term - see RATE_LPF_HZ. Only used on the
+    /// non-DMP path; the DMP path's hardware DLPF at 51 Hz already covers this
+    #[cfg_attr(feature = "dmp", allow(dead_code))]
+    d_filter: f32,
 }
 
 impl Pid {
-    const fn new(kp: f32, ki: f32, kd: f32, integral_limit: f32) -> Self {
+    const fn new(kp: f32, ki: f32, kd: f32, integral_limit: f32, leak: f32) -> Self {
         Self {
             kp,
             ki,
@@ -100,6 +277,8 @@ impl Pid {
             integral: 0.0,
             prev_error: f32::NAN,
             integral_limit,
+            leak,
+            d_filter: 0.0,
         }
     }
 
@@ -109,51 +288,34 @@ impl Pid {
             self.reset();
             return self.kp * error;
         }
-        self.integral =
-            (self.integral + error * dt).clamp(-self.integral_limit, self.integral_limit);
-        // no software LPF on derivative — hardware DLPF at 51 Hz handles it
-        let derivative = if self.prev_error.is_nan() {
+        self.integral = (self.integral * (1.0 - self.leak * dt).max(0.0) + error * dt)
+            .clamp(-self.integral_limit, self.integral_limit);
+        let raw_derivative = if self.prev_error.is_nan() {
             0.0
         } else {
             (error - self.prev_error) / dt
         };
         self.prev_error = error;
+
+        // DMP path: hardware DLPF at 51 Hz already covers this signal, no need to filter again.
+        // Non-DMP path: hardware DLPF is 197 Hz (much wider), so real prop/motor vibration was
+        // passing straight through into the derivative term unfiltered - see RATE_LPF_HZ
+        #[cfg(feature = "dmp")]
+        let derivative = raw_derivative;
+        #[cfg(not(feature = "dmp"))]
+        let derivative = {
+            self.d_filter +=
+                filters::lpf_alpha(filters::RATE_LPF_HZ, dt) * (raw_derivative - self.d_filter);
+            self.d_filter
+        };
+
         self.kp * error + self.ki * self.integral + self.kd * derivative
     }
 
     fn reset(&mut self) {
         self.integral = 0.0;
+        self.d_filter = 0.0;
         self.prev_error = f32::NAN;
-    }
-}
-
-/// AccelBias
-///
-/// One-time accelerometer bias + scale correction, computed by the 6-orientation tumble
-/// calibration (behind `--features calibrate`) and loaded from flash at boot - see
-/// `calibration_storage`. Unlike gyro bias this isn't re-learned continuously; accel bias
-/// mostly comes from IMU mounting tilt and silicon offset, both fixed for a given build.
-#[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "dmp", allow(dead_code))] // only applied on the non-dmp (software fusion) path
-pub struct AccelBias {
-    pub bias: Vector3<f32>,
-    pub scale: Vector3<f32>,
-}
-
-impl Default for AccelBias {
-    fn default() -> Self {
-        Self {
-            bias: Vector3::zeros(),
-            scale: Vector3::new(1.0, 1.0, 1.0),
-        }
-    }
-}
-
-#[cfg_attr(feature = "dmp", allow(dead_code))]
-impl AccelBias {
-    // matches flix's apply step exactly: acc = (acc - accBias) / accScale
-    fn apply(&self, accel: Vector3<f32>) -> Vector3<f32> {
-        (accel - self.bias).component_div(&self.scale)
     }
 }
 
@@ -164,33 +326,59 @@ mod gyro_bias {
     const GYRO_BIAS_ALPHA: f32 = 0.001;
     const LANDED_DEBOUNCE: Duration = Duration::from_secs(2);
     const LANDED_ACCEL_TOLERANCE_G: f32 = 0.1; // +/- 10% of 1g
+    // raw (not bias-corrected) gyro norm thresholds for "not actually rotating". Armed: has to
+    // clear whatever residual bias might still be uncorrected (a few tens of deg/s at worst),
+    // so it can keep learning while sitting still waiting to take off. Disarmed: much stricter,
+    // so deliberate handling - picking it up, slowly tilting it to check response - doesn't get
+    // mistaken for bias. Both stay well under real flight rates (typically hundreds of deg/s).
+    const GYRO_STILL_THRESHOLD_ARMED_RAD_S: f32 = 0.5;
+    const GYRO_STILL_THRESHOLD_DISARMED_RAD_S: f32 = 0.05;
 
     /// BiasTracker
     ///
-    /// Continuously re-learns the gyro's zero-rate bias whenever the quad is sitting still
-    /// (flix's calibrateGyroOnce/landedDelay pattern). "Still" means disarmed and the accelerometer reads
-    /// close to 1g
+    /// Continuously re-learns the gyro's zero-rate bias whenever the quad is actually
+    /// motionless (flix's calibrateGyroOnce/landedDelay pattern, generalized to motion instead
+    /// of a flat disarmed-only requirement - see `update`). "Still" means the accelerometer
+    /// reads close to 1g and the raw gyro isn't reporting real rotation - armed or not, so a
+    /// bad estimate can't stay stuck for an entire flight just because the quad is armed, but
+    /// with a stricter bar while disarmed so handling it by hand doesn't get learned as bias.
     pub struct BiasTracker {
         bias: Vector3<f32>,
         landed_since: Option<Instant>,
     }
 
     impl BiasTracker {
-        pub fn new() -> Self {
+        /// Starts from an already-known bias estimate (e.g. a quick boot-time average) instead
+        /// of zero, so there's no window where a fully uncorrected bias reaches the control
+        /// loop while this converges from scratch.
+        pub fn new_seeded(bias: Vector3<f32>) -> Self {
             Self {
-                bias: Vector3::zeros(),
+                bias,
                 landed_since: None,
             }
         }
 
-        // returns the current bias estimate - subtract this from raw gyro readings
+        // returns the current bias estimate - subtract this from raw gyro readings.
+        // not called anywhere right now - see the comment at read_fusion's commented-out call
+        // site. kept (not deleted) so re-enabling it is a one-line uncomment
+        #[allow(dead_code)]
         pub fn update(
             &mut self,
             armed: bool,
             accel: Vector3<f32>,
             gyro: Vector3<f32>,
         ) -> Vector3<f32> {
-            let landed = !armed && (accel.norm() - 1.0).abs() < LANDED_ACCEL_TOLERANCE_G;
+            // motion-based rather than a flat "must be disarmed" - lets it keep learning while
+            // armed and genuinely still (fixes it being stuck for the whole flight otherwise),
+            // but demands much stronger stillness while disarmed so picking it up and tilting
+            // it by hand isn't mistaken for bias
+            let gyro_threshold = if armed {
+                GYRO_STILL_THRESHOLD_ARMED_RAD_S
+            } else {
+                GYRO_STILL_THRESHOLD_DISARMED_RAD_S
+            };
+            let landed = (accel.norm() - 1.0).abs() < LANDED_ACCEL_TOLERANCE_G
+                && gyro.norm() < gyro_threshold;
             if !landed {
                 self.landed_since = None;
                 return self.bias;
@@ -202,6 +390,78 @@ mod gyro_bias {
             }
             self.bias
         }
+
+        // current bias estimate, without feeding it a new sample - used directly in read_fusion
+        // now that continuous re-learning (update) is disabled, and still doubles as the
+        // telemetry-verbose snapshot getter
+        pub fn bias(&self) -> Vector3<f32> {
+            self.bias
+        }
+    }
+
+    // averages a batch of raw gyro samples right at startup and seeds a BiasTracker with it
+    // Assumes the quad is sitting still once sampling starts, same assumption every
+    // other flight-controller boot calibration makes. commented out: biastracker::update EMA
+    //
+    // waits for the same data-ready interrupt the main loop uses before each read
+    // also tracks per-axis variance (Welford's online algorithm - single pass, no need to
+    // buffer all 300 samples) and rejects the whole seed if it looks like the quad was moved during
+    // sampling, matching betaflight's performGyroCalibration stddev-reject behavior. falls back to
+    // an unseeded (zero) bias if every read failed or gets rejected
+    pub(crate) async fn seed_gyro_bias(
+        sensor: &mut Sensor20948<'_>,
+        int_pin: &mut gpio::Input<'static>,
+    ) -> gyro_bias::BiasTracker {
+        // time to plug in the battery
+        const STARTUP_DELAY_SECS: u64 = 3;
+        embassy_time::Timer::after_secs(STARTUP_DELAY_SECS).await;
+
+        const BOOT_SAMPLES: u32 = 300;
+        // reject anything over this
+        const STDDEV_REJECT_THRESHOLD_RAD_S: f32 = 0.05;
+
+        let mut mean = Vector3::zeros();
+        let mut m2 = Vector3::zeros();
+        let mut successful: u32 = 0;
+        for _ in 0..BOOT_SAMPLES {
+            int_pin.wait_for_high().await;
+            match sensor.read().await {
+                Ok((_, g)) => {
+                    successful += 1;
+                    let delta = g - mean;
+                    mean += delta / successful as f32;
+                    let delta2 = g - mean;
+                    m2 += delta.component_mul(&delta2);
+                }
+                Err(e) => defmt::error!("gyro bias seed read error: {}", defmt::Debug2Format(&e)),
+            }
+        }
+        if successful == 0 {
+            defmt::error!("gyro bias seeding got zero successful reads - starting from zero bias");
+            return gyro_bias::BiasTracker::new_seeded(Vector3::zeros());
+        }
+
+        let variance = m2 / successful as f32;
+        let stddev = Vector3::new(
+            libm::sqrtf(variance.x),
+            libm::sqrtf(variance.y),
+            libm::sqrtf(variance.z),
+        );
+        if stddev.x > STDDEV_REJECT_THRESHOLD_RAD_S
+            || stddev.y > STDDEV_REJECT_THRESHOLD_RAD_S
+            || stddev.z > STDDEV_REJECT_THRESHOLD_RAD_S
+        {
+            defmt::error!(
+                "gyro bias seed rejected - moved during sampling (stddev {} {} {} rad/s) - starting from zero bias",
+                stddev.x,
+                stddev.y,
+                stddev.z
+            );
+            return gyro_bias::BiasTracker::new_seeded(Vector3::zeros());
+        }
+
+        defmt::info!("seeded gyro bias {}", defmt::Debug2Format(&mean));
+        gyro_bias::BiasTracker::new_seeded(mean)
     }
 }
 
@@ -323,17 +583,66 @@ async fn read_fusion<F: ImuFusion>(
     sensor: &mut Sensor20948<'_>,
     filter: &mut F,
     gyro_bias: &mut gyro_bias::BiasTracker,
+    rate_filter: &mut filters::Lpf3,
+    accel_filter: &mut filters::Lpf3,
     accel_bias: &AccelBias,
-    armed: bool,
+    _armed: bool,
     dt: f32,
     log_counter: &mut u32,
-) -> Option<(UnitQuaternion<f32>, Vector3<f32>)> {
+) -> Option<(UnitQuaternion<f32>, Vector3<f32>, Vector3<f32>)> {
     match sensor.read().await {
         Ok((accel, gyro)) => {
             let accel = accel_bias.apply(accel);
-            let bias = gyro_bias.update(armed, accel, gyro);
+
+            // THIS IS SPECIFIC TO MY CRAFT, it's mounted not perfectly so I'm compensating
+            // undo the mounting tilt so a level frame reads as (0, 0, 0) - see MOUNT_TILT_ROLL_RAD
+            let mount_trim =
+                UnitQuaternion::from_euler_angles(filters::MOUNT_TILT_ROLL_RAD, 0.0, 0.0);
+            // filtered here (before bias/mount-trim touch gyro at all) purely so the commented-out
+            // BiasTracker call below sees the same accel signal the health gate further down does,
+            // if it's ever re-enabled - see ACCEL_LPF_HZ
+            let accel = accel_filter.update(mount_trim * accel, dt);
+
+            // continuous in-flight bias re-learning is disabled for now - see the "is the gyro
+            // bias tracker worth it" investigation. boot-time seeding (seed_gyro_bias) alone
+            // covers it: measured bias is tiny (~0.003-0.007 rad/s, negligible against real
+            // torque output), ongoing accel correction already compensates for roll/pitch drift
+            // as a side effect, and betaflight does the same thing - gyroStartCalibration runs
+            // once at boot and once on first arm, never continuously during flight. re-enable by
+            // uncommenting if a real need for in-flight re-learning shows up (e.g. thermal drift
+            // over a long flight) - accel above is already correctly filtered for when it does
+            // let bias = gyro_bias.update(armed, accel, gyro);
+            let bias = gyro_bias.bias();
+            defmt::trace!(
+                "gyro bias: {} {} {} | accel norm: {}",
+                bias.x,
+                bias.y,
+                bias.z,
+                accel.norm()
+            );
             let gyro = gyro - bias;
-            let quat = filter.update_imu(dt, accel, gyro);
+            let gyro = mount_trim * gyro;
+
+            // real prop/motor vibration under thrust - see RATE_LPF_HZ. same filtered rate
+            // feeds both the fusion filter below and the inner rate loop (via the returned gyro)
+            let gyro = rate_filter.update(gyro, dt);
+
+            // outside ACCEL_HEALTHY_MIN..MAX, this sample isn't (close to) pure gravity - real
+            // vibration or motion is mixed in, so its direction would pull the attitude estimate
+            // the wrong way. feed the fusion filter a zero vector instead: both Madgwick and
+            // Mahony's update_imu treat a non-normalizable accel as "no valid accel this tick"
+            // and fall back to pure gyro integration, skipping the correction entirely rather
+            // than trusting a distorted "down" - matches betaflight's imuIsAccelerometerHealthy()
+            let accel_norm = accel.norm();
+            let accel_for_fusion = if (filters::ACCEL_HEALTHY_MIN..=filters::ACCEL_HEALTHY_MAX)
+                .contains(&accel_norm)
+            {
+                accel
+            } else {
+                Vector3::zeros()
+            };
+
+            let quat = filter.update_imu(dt, accel_for_fusion, gyro);
 
             *log_counter += 1;
             if *log_counter >= crate::LOG_EVERY_N {
@@ -350,7 +659,7 @@ async fn read_fusion<F: ImuFusion>(
                     yaw * fusion::RAD_TO_DEG,
                 );
             }
-            Some((quat, gyro))
+            Some((quat, gyro, accel))
         }
         Err(e) => {
             defmt::error!("IMU read error: {}", defmt::Debug2Format(&e));
@@ -359,7 +668,7 @@ async fn read_fusion<F: ImuFusion>(
     }
 }
 
-// MARG variant of read_fusion - adds the magnetometer so yaw has an absolute reference
+// adds the magnetometer so yaw has an absolute reference
 // instead of pure gyro integration. visualizer-only for now, not wired into run_control
 #[allow(dead_code)] // only called from run_fusion_visualizer, which needs the visualize feature
 async fn read_fusion_marg<F: MargFusion>(
@@ -420,24 +729,40 @@ pub async fn run_control(
     #[cfg(feature = "dmp")]
     let mut last_quat: Option<icm20948::dmp::Quaternion> = None;
     #[cfg(not(feature = "dmp"))]
-    let mut fusion_filter = fusion::FusionBuilder::new().icm20948().madgwick().build();
+    let mut fusion_filter = fusion::FusionBuilder::new()
+        .icm20948()
+        .madgwick()
+        .beta(BETA_FILTER)
+        .build();
     #[cfg(not(feature = "dmp"))]
-    let mut gyro_bias = gyro_bias::BiasTracker::new();
+    let mut gyro_bias = gyro_bias::seed_gyro_bias(&mut sensor, &mut int_pin).await;
+    #[cfg(not(feature = "dmp"))]
+    let mut rate_filter = filters::Lpf3::new(filters::RATE_LPF_HZ);
+    #[cfg(not(feature = "dmp"))]
+    let mut accel_filter = filters::Lpf3::new_two_pole(filters::ACCEL_LPF_HZ);
 
     // inner rate PIDs
     let mut roll_pid = Pid::new(
         RATE_KP_ROLL_PITCH,
         RATE_KI_ROLL_PITCH,
         RATE_KD_ROLL_PITCH,
-        0.3,
+        INTEGRAL_LIMIT,
+        RATE_INTEGRAL_LEAK,
     );
     let mut pitch_pid = Pid::new(
         RATE_KP_ROLL_PITCH,
         RATE_KI_ROLL_PITCH,
         RATE_KD_ROLL_PITCH,
-        0.3,
+        INTEGRAL_LIMIT,
+        RATE_INTEGRAL_LEAK,
     );
-    let mut yaw_pid = Pid::new(RATE_KP_YAW, RATE_KI_YAW, RATE_KD_YAW, 0.3);
+    let mut yaw_pid = Pid::new(
+        RATE_KP_YAW,
+        RATE_KI_YAW,
+        RATE_KD_YAW,
+        INTEGRAL_LIMIT,
+        RATE_INTEGRAL_LEAK,
+    );
 
     let mut target_yaw: f32 = 0.0;
     let mut yaw_init = false;
@@ -470,22 +795,25 @@ pub async fn run_control(
         }
 
         #[cfg(feature = "dmp")]
-        let (quat, g, dt) = {
+        let (quat, g, dt, accel) = {
             let (quat, g) = match read_dmp(&mut sensor, &mut log_counter, &mut last_quat).await {
                 Some(d) => d,
                 None => continue,
             };
             let dt = dur_since(&mut last_instant);
-            (quat, g, dt)
+            // DMP fuses on-chip from uncorrected raw readings - no corrected accel to report
+            (quat, g, dt, Vector3::<f32>::zeros())
         };
 
         #[cfg(not(feature = "dmp"))]
-        let (quat, g, dt) = {
+        let (quat, g, dt, accel) = {
             let dt = dur_since(&mut last_instant);
-            let (quat, g) = match read_fusion(
+            let (quat, g, accel) = match read_fusion(
                 &mut sensor,
                 &mut fusion_filter,
                 &mut gyro_bias,
+                &mut rate_filter,
+                &mut accel_filter,
                 &accel_bias,
                 armed,
                 dt,
@@ -496,17 +824,37 @@ pub async fn run_control(
                 Some(d) => d,
                 None => continue,
             };
-            (quat, g, dt)
+            (quat, g, dt, accel)
         };
+        #[cfg(not(feature = "telemetry-verbose"))]
+        let _ = &accel;
 
         let euler = quat.euler_angles();
+
+        #[cfg(all(feature = "telemetry-verbose", feature = "dmp"))]
+        let bias_snapshot = Vector3::zeros();
+        #[cfg(all(feature = "telemetry-verbose", not(feature = "dmp")))]
+        let bias_snapshot = gyro_bias.bias();
 
         // failsafe: zero motors if no packet, packet is stale (>500 ms), or disarmed
         let pkt = match controls.filter(|_| armed) {
             Some((p, _)) => p,
             None => {
-                #[cfg(feature = "telemetry")]
-                publish_telemetry(euler, (0, 0, 0, 0), armed, !fresh, g).await;
+                #[cfg(all(feature = "telemetry", not(feature = "telemetry-verbose")))]
+                publish_telemetry(euler, (0, 0, 0, 0), armed, !fresh).await;
+                #[cfg(feature = "telemetry-verbose")]
+                publish_telemetry(
+                    euler,
+                    (0, 0, 0, 0),
+                    armed,
+                    !fresh,
+                    g,
+                    Vector3::zeros(),
+                    bias_snapshot,
+                    dt,
+                    accel,
+                )
+                .await;
                 continue;
             }
         };
@@ -515,7 +863,7 @@ pub async fn run_control(
         // DMP gives us the fused quaternion directly instead of running Mahony/Madgwick
 
         let actual_yaw = euler.2;
-        let t = pkt.throttle as f32 / 100.0;
+        let pkt_throttle = pkt.throttle as f32 / 100.0;
 
         // latch heading on first armed tick (flix: yawTarget initialised from attitude.getYaw())
         if !yaw_init {
@@ -524,7 +872,7 @@ pub async fn run_control(
         }
 
         // while near the ground keep target tracking actual so handling the drone doesn't build a large error
-        if t < 0.15 {
+        if pkt_throttle < 0.15 {
             target_yaw = actual_yaw;
         }
 
@@ -541,10 +889,23 @@ pub async fn run_control(
         };
 
         // like controlTorque / motor mixing (flix)
-        if t < 0.05 {
+        if pkt_throttle < 0.05 {
             motors.turn_off();
-            #[cfg(feature = "telemetry")]
-            publish_telemetry(euler, (0, 0, 0, 0), armed, !fresh, g).await;
+            #[cfg(all(feature = "telemetry", not(feature = "telemetry-verbose")))]
+            publish_telemetry(euler, (0, 0, 0, 0), armed, !fresh).await;
+            #[cfg(feature = "telemetry-verbose")]
+            publish_telemetry(
+                euler,
+                (0, 0, 0, 0),
+                armed,
+                !fresh,
+                g,
+                Vector3::zeros(),
+                bias_snapshot,
+                dt,
+                accel,
+            )
+            .await;
             continue;
         }
 
@@ -574,11 +935,13 @@ pub async fn run_control(
         // independently, so yaw drift can't couple in - matches peterkrull/quad's
         // task_state_estimator.rs + task_attitude_controller.rs, which uses this approach.
         // to switch: comment out the att_err block above (through yaw_rate_sp) and uncomment this:
-        let target_roll = pkt.roll * MAX_TILT_RAD;
+        let target_roll = pkt.roll * MAX_TILT_RAD; // pkt.roll/pitch are [-1..=1] so the multiplication caps 1 at MAX_TILT_RAD
         let target_pitch = pkt.pitch * MAX_TILT_RAD;
         let (actual_roll, actual_pitch, _) = euler;
-        let roll_rate_sp = ANGLE_P_ROLL_PITCH * wrap_angle(target_roll - actual_roll);
-        let pitch_rate_sp = ANGLE_P_ROLL_PITCH * wrap_angle(target_pitch - actual_pitch);
+        let roll_err = deadband(wrap_angle(target_roll - actual_roll), ANGLE_DEADBAND_RAD);
+        let pitch_err = deadband(wrap_angle(target_pitch - actual_pitch), ANGLE_DEADBAND_RAD);
+        let roll_rate_sp = ANGLE_P_ROLL_PITCH * roll_err;
+        let pitch_rate_sp = ANGLE_P_ROLL_PITCH * pitch_err;
         let yaw_rate_sp = ANGLE_P_YAW * wrap_angle(target_yaw - actual_yaw) + yaw_ff;
 
         // inner PID:
@@ -588,12 +951,13 @@ pub async fn run_control(
         let pitch_torque = pitch_pid.update(pitch_rate_sp - g.y, dt);
         let yaw_torque = yaw_pid.update(yaw_rate_sp - g.z, dt);
 
-        let mut fl = t + roll_torque - pitch_torque + yaw_torque;
-        let mut fr = t - roll_torque - pitch_torque - yaw_torque;
-        let mut rl = t + roll_torque + pitch_torque - yaw_torque;
-        let mut rr = t - roll_torque + pitch_torque + yaw_torque;
+        let mut fl = pkt_throttle + roll_torque - pitch_torque + yaw_torque;
+        let mut fr = pkt_throttle - roll_torque - pitch_torque - yaw_torque;
+        let mut rl = pkt_throttle + roll_torque + pitch_torque - yaw_torque;
+        let mut rr = pkt_throttle - roll_torque + pitch_torque + yaw_torque;
 
         // desaturate: reduce all motors equally so the highest stays at 1.0 (flix desaturate())
+        // look at betaflight: motorMixNormalizationFactor for more advanced motor mixing
         let max = fl.max(fr).max(rl).max(rr);
         if max > 1.0 {
             let excess = max - 1.0;
@@ -619,7 +983,7 @@ pub async fn run_control(
 
         let (dfl, dfr, drl, drr) = motors.set_motors(fl, fr, rl, rr);
         defmt::trace!(
-            "torques roll={} pitch={} yaw={} | mix fl={} fr={} rl={} rr={} | duty fl={} fr={} rl={} rr={}",
+            "torques roll={} pitch={} yaw={} | mix fl={} fr={} rl={} rr={} | duty fl={} fr={} rl={} rr={} | dt={}",
             roll_torque,
             pitch_torque,
             yaw_torque,
@@ -631,15 +995,28 @@ pub async fn run_control(
             dfr,
             drl,
             drr,
+            dt,
         );
 
-        #[cfg(feature = "telemetry")]
+        #[cfg(all(feature = "telemetry", not(feature = "telemetry-verbose")))]
+        publish_telemetry(
+            euler,
+            (dfl as u16, dfr as u16, drl as u16, drr as u16),
+            armed,
+            false,
+        )
+        .await;
+        #[cfg(feature = "telemetry-verbose")]
         publish_telemetry(
             euler,
             (dfl as u16, dfr as u16, drl as u16, drr as u16),
             armed,
             false,
             g,
+            Vector3::new(roll_torque, pitch_torque, yaw_torque),
+            bias_snapshot,
+            dt,
+            accel,
         )
         .await;
     }
@@ -664,8 +1041,14 @@ pub async fn run_fusion_visualizer(
     accel_bias: AccelBias,
 ) {
     let mut log_counter: u32 = 0;
-    let mut fusion_filter = fusion::FusionBuilder::new().icm20948().madgwick().build();
-    let mut gyro_bias = gyro_bias::BiasTracker::new();
+    let mut fusion_filter = fusion::FusionBuilder::new()
+        .icm20948()
+        .madgwick()
+        .beta(BETA_FILTER)
+        .build();
+    let mut gyro_bias = seed_gyro_bias(&mut sensor, &mut int_pin).await;
+    let mut rate_filter = filters::Lpf3::new(filters::RATE_LPF_HZ);
+    let mut accel_filter = filters::Lpf3::new_two_pole(filters::ACCEL_LPF_HZ);
     let mut last_instant: Option<Instant> = None;
     loop {
         int_pin.wait_for_high().await;
@@ -675,6 +1058,8 @@ pub async fn run_fusion_visualizer(
             &mut sensor,
             &mut fusion_filter,
             &mut gyro_bias,
+            &mut rate_filter,
+            &mut accel_filter,
             &accel_bias,
             false, // no arming concept in the visualizer, motors never spin
             dt,
