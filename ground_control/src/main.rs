@@ -2,10 +2,10 @@ use std::io::ErrorKind;
 use std::{
     net::{SocketAddr, UdpSocket},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use gilrs::{Axis, Button, Event, EventType, Gilrs};
+use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs};
 #[cfg(feature = "telemetry")]
 use libs::telemetry::{TelemetryPacket, TELEMETRY_SIZE};
 use libs::{
@@ -13,6 +13,19 @@ use libs::{
     control::ControlPacket,
 };
 use tracing::{error, info, warn};
+
+// EdgeTX's USB joystick VID:PID, used to gate the RadioMaster's SA switch (Button::Select)
+// so it can't be triggered by an Xbox controller's Back/View button
+const RADIOMASTER_VENDOR_ID: u16 = 0x1209;
+const RADIOMASTER_PRODUCT_ID: u16 = 0x4f54;
+
+const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
+
+fn is_radiomaster(gilrs: &Gilrs, id: GamepadId) -> bool {
+    let gamepad = gilrs.gamepad(id);
+    gamepad.vendor_id() == Some(RADIOMASTER_VENDOR_ID)
+        && gamepad.product_id() == Some(RADIOMASTER_PRODUCT_ID)
+}
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -45,18 +58,17 @@ fn main() -> anyhow::Result<()> {
         };
 
         let mut pkt = ControlPacket::new(0, 0.0, 0.0, 0.0, false);
+
+        let mut last_sent: Option<ControlPacket> = None;
+        let mut last_send_at = Instant::now();
         // only log the routine telemetry line when something actually changed
         #[cfg(feature = "telemetry")]
         let mut last_telemetry: Option<TelemetryPacket> = None;
 
         'inner: loop {
-            // block up to 20ms waiting for input, then send current state regardless
-            while let Some(Event { event, .. }) =
-                gilrs.next_event_blocking(Some(Duration::from_millis(20)))
-            // this 20ms loop drives the telemetry packets, they only get sent in response to
-            // CONTROL packets, so if no input changes (no throttle/direction),
-            // control packets still get sent every 20ms and we get telemetry data
-            {
+            // wait for the next event, but never past the next heartbeat deadline
+            let wait = HEARTBEAT_INTERVAL.saturating_sub(last_send_at.elapsed());
+            if let Some(Event { id, event, .. }) = gilrs.next_event_blocking(Some(wait)) {
                 match event {
                     EventType::AxisChanged(Axis::LeftStickY, value, _) => {
                         pkt.throttle = (value.max(0.0) * 100.0) as u8;
@@ -74,25 +86,45 @@ fn main() -> anyhow::Result<()> {
                         pkt.yaw = val;
                         info!("yaw: {}", val);
                     }
-                    // start button toggles arm
+                    // Xbox-style controller: momentary Start button toggles arm
                     EventType::ButtonPressed(Button::Start, _) => {
                         pkt.set_armed(!pkt.armed());
+                        info!("armed: {}", pkt.armed());
+                    }
+                    // RadioMaster SA switch: armed follows the switch position directly
+                    EventType::ButtonPressed(Button::Select, _) if is_radiomaster(&gilrs, id) => {
+                        pkt.set_armed(true);
+                        info!("armed: {}", pkt.armed());
+                    }
+                    EventType::ButtonReleased(Button::Select, _) if is_radiomaster(&gilrs, id) => {
+                        pkt.set_armed(false);
                         info!("armed: {}", pkt.armed());
                     }
                     EventType::Disconnected => {
                         info!("gamepad disconnected — disarming");
                         pkt.throttle = 0;
                         pkt.set_armed(false);
+                        // best-effort - we're tearing down this connection either way
+                        let _ = socket.send_to(&pkt.to_bytes(), (ip, port));
                         break 'inner;
                     }
                     EventType::Connected => info!("gamepad connected"),
                     _ => {}
                 }
             }
+
+            // send on any real change or once the heartbeat deadline passes
+            let heartbeat_due = last_send_at.elapsed() >= HEARTBEAT_INTERVAL;
+            if last_sent == Some(pkt) && !heartbeat_due {
+                continue;
+            }
+
             if let Err(e) = socket.send_to(&pkt.to_bytes(), (ip, port)) {
                 info!("send error: {e}");
                 break 'inner;
             }
+            last_sent = Some(pkt);
+            last_send_at = Instant::now();
 
             #[cfg(feature = "telemetry")]
             {

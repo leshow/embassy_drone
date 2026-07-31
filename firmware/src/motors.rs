@@ -66,31 +66,34 @@ impl<'a> Motors<'a> {
         #[cfg(feature = "test_motors")]
         {
             use embassy_time::Timer;
-            let test_spin = 20;
+            let test_spin = 50;
             defmt::info!("testing front left");
-            fl.start_duty_fade(0, test_spin, 2_000)
+            fl.start_duty_fade(0, test_spin, 3_000)
                 .expect("failed to set duty");
-            Timer::after_secs(3).await;
-            defmt::info!("testing front right");
-            fr.start_duty_fade(0, test_spin, 2_000)
-                .expect("failed to set duty");
-            Timer::after_secs(3).await;
-            defmt::info!("testing rear left");
-            rl.start_duty_fade(0, test_spin, 2_000)
-                .expect("failed to set duty");
-            Timer::after_secs(3).await;
-            defmt::info!("testing rear right");
-            rr.start_duty_fade(0, test_spin, 2_000)
-                .expect("failed to set duty");
-            defmt::info!("motors initialized: all channels {}%", test_spin);
-            Timer::after_secs(3).await;
-
+            Timer::after_secs(4).await;
             fl.set_duty(0).expect("failed to set duty");
+
+            defmt::info!("testing front right");
+            fr.start_duty_fade(0, test_spin, 3_000)
+                .expect("failed to set duty");
+            Timer::after_secs(4).await;
             fr.set_duty(0).expect("failed to set duty");
+
+            defmt::info!("testing rear left");
+            rl.start_duty_fade(0, test_spin, 3_000)
+                .expect("failed to set duty");
+            Timer::after_secs(4).await;
             rl.set_duty(0).expect("failed to set duty");
+
+            defmt::info!("testing rear right");
+            rr.start_duty_fade(0, test_spin, 3_000)
+                .expect("failed to set duty");
+            Timer::after_secs(4).await;
             rr.set_duty(0).expect("failed to set duty");
+
+            defmt::info!("motors initialized: all channels {}%", test_spin);
         }
-        defmt::info!("motors initialized: all channels {}%", duty_pct);
+        defmt::info!("pwm initialized: all channels {}%", duty_pct);
 
         Self { fl, fr, rl, rr }
     }

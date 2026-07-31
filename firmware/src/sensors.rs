@@ -116,15 +116,16 @@ impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
                     ..Default::default()
                 })
                 .await?;
-            // driver
-            //     .init_magnetometer(MagConfig::default(), &mut embassy_time::Delay)
-            //     .await
-            //     .inspect_err(|e| {
-            //         defmt::error!(
-            //             "error initializing magnetometer: {}",
-            //             defmt::Debug2Format(e)
-            //         );
-            //     })?
+            #[cfg(feature = "mag")]
+            driver
+                .init_magnetometer(MagConfig::default(), &mut embassy_time::Delay)
+                .await
+                .inspect_err(|e| {
+                    defmt::error!(
+                        "error initializing magnetometer: {}",
+                        defmt::Debug2Format(e)
+                    );
+                })?;
         }
 
         #[cfg(feature = "dmp")]
@@ -313,6 +314,78 @@ impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
             bias: (acc_max + acc_min) / 2.0,
             scale: (acc_max - acc_min) / 2.0,
         })
+    }
+
+    /// magnetometer hard-iron/soft-iron calibration - no fixed poses, just rotate through as
+    /// many orientations as possible while it collects samples. see libs::mag_calibration for
+    /// the actual fitting algorithm; this just feeds it live samples and reports progress.
+    /// stops once the sample buffer's coverage (mean_distance) crosses MIN_MEAN_DISTANCE, or
+    /// gives up after MAX_SAMPLES if coverage never gets there (e.g. barely moved).
+    ///
+    /// called right after run_calibration in the same session - doesn't wait on
+    /// wifi::calibrate::START itself, that wait already happened for the accel pass
+    #[cfg(feature = "mag")]
+    pub async fn run_mag_calibration(&mut self) -> Option<MagBias> {
+        const N: usize = 30; // matches peterkrull/mag-calibrator-rs's own real-hardware usage
+        const MIN_MEAN_DISTANCE: f32 = 0.035; // matches peterkrull/mag-calibrator-rs's own usage
+        const MAX_SAMPLES: u32 = 3000; // ~2.5min at the 50ms sample period below
+
+        let publisher = crate::wifi::calibrate::EVENTS
+            .publisher()
+            .expect("calibration publisher already taken");
+        defmt::info!("rotate the drone through as many orientations as possible");
+        publisher
+            .publish(libs::calibrate::CalibrationMode::MagRotate)
+            .await;
+
+        // TODO: verify this against real raw magnetometer magnitude on the bench and adjust -
+        // picked from peterkrull/mag-calibrator-rs's own real-hardware value as a starting
+        // point, not measured on our hardware yet. see mag_calibration's tests for why a
+        // mismatched pre_scaler can make the fit ill-conditioned
+        let mut cal = libs::mag_calibration::MagCalibrator::<N>::new().pre_scaler(200.0);
+
+        for _ in 0..MAX_SAMPLES {
+            match self.driver.read_magnetometer().await {
+                Ok(m) => {
+                    cal.evaluate_sample_vec(Vector3::new(m.x, m.y, m.z));
+                    if cal.get_mean_distance() > MIN_MEAN_DISTANCE
+                        && let Some((bias, scale)) = cal.perform_calibration()
+                    {
+                        return Some(MagBias {
+                            bias: bias.into(),
+                            scale: scale.into(),
+                        });
+                    }
+                }
+                Err(e) => defmt::error!(
+                    "mag read error during calibration: {}",
+                    defmt::Debug2Format(&e)
+                ),
+            }
+            embassy_time::Timer::after_millis(50).await;
+        }
+        defmt::error!("mag calibration timed out without reaching good sample coverage");
+        None
+    }
+}
+
+/// One-time magnetometer bias + scale correction, from the mag rotate calibration routine
+/// (--features calibrate,mag) - see calibration_storage. Not yet consumed by the live fusion
+/// loop (see docs/todo.md) - needs its own health gate first, same idea as accel's.
+#[cfg(feature = "mag")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MagBias {
+    pub bias: Vector3<f32>,
+    pub scale: Vector3<f32>,
+}
+
+#[cfg(feature = "mag")]
+impl Default for MagBias {
+    fn default() -> Self {
+        Self {
+            bias: Vector3::zeros(),
+            scale: Vector3::new(1.0, 1.0, 1.0),
+        }
     }
 }
 

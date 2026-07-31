@@ -11,6 +11,8 @@ use esp_hal::rom::crc;
 use esp_storage::FlashStorage;
 
 use crate::flight::AccelBias;
+#[cfg(feature = "mag")]
+use crate::sensors::MagBias;
 
 // marks a written record, readable in a raw flash dump, distinguishing it from erased flash
 // (reads back as all 0xFF) or leftover garbage
@@ -18,6 +20,17 @@ const MAGIC: [u8; 4] = *b"ACAL";
 // INVARIANT: added fields to accelbias need to have more space allocated here
 const PAYLOAD_LEN: usize = (3 * 4) + (3 * 4); // 3 f32 bias + 3 f32 scale in AccelBias 24b
 const RECORD_LEN: usize = MAGIC.len() + PAYLOAD_LEN + 2; // magic + payload + crc16 30b
+
+// mag's record lives right after accel's in the same nvs region - same shape (bias+scale),
+// different magic so a stale/missing one doesn't get misread as the other
+#[cfg(feature = "mag")]
+const MAG_MAGIC: [u8; 4] = *b"MCAL";
+#[cfg(feature = "mag")]
+const MAG_PAYLOAD_LEN: usize = (3 * 4) + (3 * 4); // 3 f32 bias + 3 f32 scale in MagBias, 24b
+#[cfg(feature = "mag")]
+const MAG_RECORD_LEN: usize = MAG_MAGIC.len() + MAG_PAYLOAD_LEN + 2; // 30b
+#[cfg(feature = "mag")]
+const MAG_OFFSET: u32 = RECORD_LEN as u32; // starts right after accel's record
 
 impl AccelBias {
     fn as_bytes(&self) -> [u8; RECORD_LEN] {
@@ -40,6 +53,46 @@ impl AccelBias {
         }
         let stored_crc = u16::from_le_bytes(buf[4 + PAYLOAD_LEN..RECORD_LEN].try_into().ok()?);
         if stored_crc != crc_16(&buf[4..4 + PAYLOAD_LEN]) {
+            return None;
+        }
+        Some(Self {
+            bias: nalgebra::Vector3::new(
+                f32::from_le_bytes(buf[4..8].try_into().unwrap()),
+                f32::from_le_bytes(buf[8..12].try_into().unwrap()),
+                f32::from_le_bytes(buf[12..16].try_into().unwrap()),
+            ),
+            scale: nalgebra::Vector3::new(
+                f32::from_le_bytes(buf[16..20].try_into().unwrap()),
+                f32::from_le_bytes(buf[20..24].try_into().unwrap()),
+                f32::from_le_bytes(buf[24..28].try_into().unwrap()),
+            ),
+        })
+    }
+}
+
+#[cfg(feature = "mag")]
+impl MagBias {
+    fn as_bytes(&self) -> [u8; MAG_RECORD_LEN] {
+        let mut buf = [0u8; MAG_RECORD_LEN];
+        buf[0..4].copy_from_slice(&MAG_MAGIC);
+        buf[4..8].copy_from_slice(&self.bias.x.to_le_bytes());
+        buf[8..12].copy_from_slice(&self.bias.y.to_le_bytes());
+        buf[12..16].copy_from_slice(&self.bias.z.to_le_bytes());
+        buf[16..20].copy_from_slice(&self.scale.x.to_le_bytes());
+        buf[20..24].copy_from_slice(&self.scale.y.to_le_bytes());
+        buf[24..28].copy_from_slice(&self.scale.z.to_le_bytes());
+        let crc = crc_16(&buf[4..4 + MAG_PAYLOAD_LEN]);
+        buf[4 + MAG_PAYLOAD_LEN..MAG_RECORD_LEN].copy_from_slice(&crc.to_le_bytes());
+        buf
+    }
+
+    fn from_bytes(buf: &[u8; MAG_RECORD_LEN]) -> Option<MagBias> {
+        if buf[0..4] != MAG_MAGIC {
+            return None;
+        }
+        let stored_crc =
+            u16::from_le_bytes(buf[4 + MAG_PAYLOAD_LEN..MAG_RECORD_LEN].try_into().ok()?);
+        if stored_crc != crc_16(&buf[4..4 + MAG_PAYLOAD_LEN]) {
             return None;
         }
         Some(Self {
@@ -91,4 +144,27 @@ pub fn load_accel_calibration(flash: &mut FlashStorage<'_>) -> Option<AccelBias>
 #[cfg_attr(not(feature = "calibrate"), allow(unused))]
 pub fn store_accel_calibration(flash: &mut FlashStorage<'_>, cal: &AccelBias) -> bool {
     with_nvs_region(flash, |region| region.write(0, &cal.as_bytes()).is_ok()).unwrap_or(false)
+}
+
+/// Loads the persisted mag calibration, if one has been written and not since erased.
+#[cfg(feature = "mag")]
+pub fn load_mag_calibration(flash: &mut FlashStorage<'_>) -> Option<MagBias> {
+    with_nvs_region(flash, |region| {
+        let mut buf = [0u8; MAG_RECORD_LEN];
+        // MAG_OFFSET, not 0 - offset 0 is accel's own record, writing mag there would
+        // overwrite it instead of storing alongside it
+        region.read(MAG_OFFSET, &mut buf).ok()?;
+        MagBias::from_bytes(&buf)
+    })
+    .flatten()
+}
+
+/// Persists mag calibration so it survives a reboot or reflash of the app image.
+#[cfg(feature = "mag")]
+#[cfg_attr(not(feature = "calibrate"), allow(unused))]
+pub fn store_mag_calibration(flash: &mut FlashStorage<'_>, cal: &MagBias) -> bool {
+    with_nvs_region(flash, |region| {
+        region.write(MAG_OFFSET, &cal.as_bytes()).is_ok()
+    })
+    .unwrap_or(false)
 }

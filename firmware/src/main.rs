@@ -157,23 +157,58 @@ async fn main(spawner: Spawner) {
         let mut sensor = Sensor::init_icm20948(i2c)
             .await
             .expect("ICM20948 init failed");
-        let mode = match sensor.run_calibration().await {
+        let mut flash_storage = esp_storage::FlashStorage::new(peripherals.FLASH);
+
+        // accel pass - Some(()) on success so the (optional) mag pass below knows whether to
+        // bother running at all
+        let ok = match sensor.run_calibration().await {
             Some(accel_bias) => {
-                let mut flash_storage = esp_storage::FlashStorage::new(peripherals.FLASH);
                 let saved =
                     calibration_storage::store_accel_calibration(&mut flash_storage, &accel_bias);
                 if saved {
-                    defmt::info!("calibration saved: {}", defmt::Debug2Format(&accel_bias));
-                    libs::calibrate::CalibrationMode::Ended
+                    defmt::info!(
+                        "accel calibration saved: {}",
+                        defmt::Debug2Format(&accel_bias)
+                    );
+                    Some(())
                 } else {
-                    defmt::error!("failed to save calibration to flash");
-                    libs::calibrate::CalibrationMode::Failed
+                    defmt::error!("failed to save accel calibration to flash");
+                    None
                 }
             }
             None => {
-                defmt::error!("calibration aborted, nothing to save");
-                libs::calibrate::CalibrationMode::Failed
+                defmt::error!("accel calibration aborted, nothing to save");
+                None
             }
+        };
+
+        // mag pass - same session, no second wait on wifi::calibrate::START (that already
+        // happened inside run_calibration above). skipped entirely if accel already failed.
+        #[cfg(feature = "mag")]
+        let ok = match ok {
+            Some(()) => match sensor.run_mag_calibration().await {
+                Some(mag_bias) => {
+                    let saved =
+                        calibration_storage::store_mag_calibration(&mut flash_storage, &mag_bias);
+                    if saved {
+                        defmt::info!("mag calibration saved: {}", defmt::Debug2Format(&mag_bias));
+                        Some(())
+                    } else {
+                        defmt::error!("failed to save mag calibration to flash");
+                        None
+                    }
+                }
+                None => {
+                    defmt::error!("mag calibration aborted, nothing to save");
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let mode = match ok {
+            Some(()) => libs::calibrate::CalibrationMode::Ended,
+            None => libs::calibrate::CalibrationMode::Failed,
         };
         wifi::calibrate::EVENTS
             .publisher()

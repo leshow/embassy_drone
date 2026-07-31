@@ -19,7 +19,7 @@ use crate::{
 // called once per loop iteration, from whichever exit point (early continue or full mix) is
 // actually taken, so telemetry is only ever built once per tick.
 #[cfg(all(feature = "telemetry", not(feature = "telemetry-verbose")))]
-async fn publish_telemetry(
+fn publish_telemetry(
     euler: (f32, f32, f32),       // (roll, pitch, yaw) radians
     motors: (u16, u16, u16, u16), // fl fr rl rr
     armed: bool,
@@ -30,7 +30,7 @@ async fn publish_telemetry(
     let yaw_deg = euler.2 * fusion::RAD_TO_DEG;
 
     let pkt = TelemetryPacket::new(roll_deg, pitch_deg, yaw_deg, motors, armed, failsafe);
-    *wifi::TELEMETRY.lock().await = Some((pkt, Instant::now()));
+    wifi::TELEMETRY.lock(|c| c.set(Some((pkt, Instant::now()))));
 }
 
 // publishes a telemetry snapshot for the wifi udp_task to reply with on the next control packet.
@@ -38,7 +38,7 @@ async fn publish_telemetry(
 // actually taken, so telemetry is only ever built once per tick.
 #[cfg(feature = "telemetry-verbose")]
 #[allow(clippy::too_many_arguments)]
-async fn publish_telemetry(
+fn publish_telemetry(
     euler: (f32, f32, f32),       // (roll, pitch, yaw) radians
     motors: (u16, u16, u16, u16), // fl fr rl rr
     armed: bool,
@@ -56,7 +56,50 @@ async fn publish_telemetry(
     let pkt = TelemetryPacket::new(
         roll_deg, pitch_deg, yaw_deg, motors, armed, failsafe, gyro, torques, gyro_bias, dt, accel,
     );
-    *wifi::TELEMETRY.lock().await = Some((pkt, Instant::now()));
+    wifi::TELEMETRY.lock(|c| c.set(Some((pkt, Instant::now()))));
+}
+
+// same field set as publish_telemetry's verbose variant, logged locally over defmt trace
+// instead of published over wifi - unconditional on the telemetry feature, so dt/attitude/etc
+// stay visible with wifi telemetry compiled out entirely. free at the default DEFMT_LOG=info
+// (see .cargo/config.toml) - trace! compiles down to a no-op unless DEFMT_LOG=trace is set
+#[allow(clippy::too_many_arguments)]
+fn trace_telemetry(
+    euler: (f32, f32, f32),       // (roll, pitch, yaw) radians
+    motors: (u16, u16, u16, u16), // fl fr rl rr
+    armed: bool,
+    failsafe: bool,
+    gyro: Vector3<f32>,
+    torques: Vector3<f32>,   // roll/pitch/yaw PID output before mixing
+    gyro_bias: Vector3<f32>, // current BiasTracker estimate, zero on the DMP path
+    dt: f32,                 // seconds since the previous loop tick
+    accel: Vector3<f32>,     // bias + mount-trim corrected accel in g, zero on the DMP path
+) {
+    defmt::trace!(
+        "telemetry roll={}° pitch={}° yaw={}° armed={} failsafe={} | motors fl={} fr={} rl={} rr={} | gyro x={} y={} z={} | torques roll={} pitch={} yaw={} | bias x={} y={} z={} | dt={} | accel x={} y={} z={}",
+        euler.0 * fusion::RAD_TO_DEG,
+        euler.1 * fusion::RAD_TO_DEG,
+        euler.2 * fusion::RAD_TO_DEG,
+        armed,
+        failsafe,
+        motors.0,
+        motors.1,
+        motors.2,
+        motors.3,
+        gyro.x,
+        gyro.y,
+        gyro.z,
+        torques.x,
+        torques.y,
+        torques.z,
+        gyro_bias.x,
+        gyro_bias.y,
+        gyro_bias.z,
+        dt,
+        accel.x,
+        accel.y,
+        accel.z,
+    );
 }
 
 // calibrated_gyro is i16 at +/-2000 dps full scale, hardware DLPF at 51 Hz already applied
@@ -195,19 +238,30 @@ impl AccelBias {
 
 // outer loop P gains
 const ANGLE_P_ROLL_PITCH: f32 = 4.0; // flix 6.0
+// and angle_p_yaw means the controller will eventually torque
+// quad to chase drift. we can enable it when we get mag working
 const ANGLE_P_YAW: f32 = 0.0; // flix 3.0
+
+// weak "assume roughly level" prior, applied every tick regardless of accel health - bounds
+// roll/pitch drift during the stretches where the accel gate rejects the sample and nothing
+// else is correcting the estimate (measured in some flight tests: gate rejects 53-81% of samples with
+// motors spinning). matches flix's levelWeight - see libs::level_correction for the actual math
+// and its tests. weight is a fixed fraction applied per TICK, not per second (same
+// property flix's own filter turned out to have), so the real half-life depends on however fast
+// the loop actually runs.
+const LEVEL_PRIOR_WEIGHT: f32 = 0.0002;
 
 // inner loop
 const RATE_KP_ROLL_PITCH: f32 = 0.05; // flix 0.05
 const RATE_KI_ROLL_PITCH: f32 = 0.3; // flix 0.2 was set to 0.1
 const RATE_KD_ROLL_PITCH: f32 = 0.001; // flix 0.001
 
-const RATE_KP_YAW: f32 = 0.0; // flix 0.3 was set to 0.2
-const RATE_KI_YAW: f32 = 0.0;
-const RATE_KD_YAW: f32 = 0.0;
+const RATE_KP_YAW: f32 = 0.3; // flix 0.3 was set to 0.2
+const RATE_KI_YAW: f32 = 0.05;
+const RATE_KD_YAW: f32 = 0.001;
 
 const INTEGRAL_LIMIT: f32 = 0.3;
-const BETA_FILTER: f32 = 0.05;
+const BETA_FILTER: f32 = 0.1;
 // per-second decay on the rate PIDs' integral term - without this, any permanent small error
 // (mounting tolerance, an uneven resting surface - there's always something) eventually winds
 // the integral to integral_limit given enough time, no matter how small the error is. With
@@ -562,9 +616,13 @@ async fn read_dmp(
             // flag whatever telemetry is already cached so ground control sees this happened,
             // even though we have no fresh sample to publish this tick
             #[cfg(feature = "telemetry")]
-            if let Some((pkt, _)) = wifi::TELEMETRY.lock().await.as_mut() {
-                pkt.set_fifo_overflow(true);
-            }
+            wifi::TELEMETRY.lock(|c| {
+                let mut cached = c.get();
+                if let Some((pkt, _)) = cached.as_mut() {
+                    pkt.set_fifo_overflow(true);
+                }
+                c.set(cached);
+            });
             None
         }
         Err(e) => {
@@ -575,10 +633,45 @@ async fn read_dmp(
     }
 }
 
+// running min/max/avg of loop dt between periodic log lines - see read_fusion's debug log.
+// lets actual loop rate be checked without telemetry or trace logging (both DEFMT_LOG=info
+// and DEFMT_LOG=debug print this; only trace_telemetry needs DEFMT_LOG=trace)
+#[cfg(not(feature = "dmp"))]
+struct DtStats {
+    min: f32,
+    max: f32,
+    sum: f32,
+    n: u32,
+}
+
+#[cfg(not(feature = "dmp"))]
+impl DtStats {
+    const fn new() -> Self {
+        Self {
+            min: f32::MAX,
+            max: 0.0,
+            sum: 0.0,
+            n: 0,
+        }
+    }
+
+    fn record(&mut self, dt: f32) {
+        self.min = self.min.min(dt);
+        self.max = self.max.max(dt);
+        self.sum += dt;
+        self.n += 1;
+    }
+
+    fn avg(&self) -> f32 {
+        self.sum / self.n as f32
+    }
+}
+
 // reads raw accel/gyro and fuses them into an orientation quaternion via whichever filter
 // implements ImuFusion. same (Quaternion, gyro_rad_s) shape as read_dmp, so the rest of the
 // control loop is unchanged regardless of which sensor-read path or filter is active
 #[cfg(not(feature = "dmp"))]
+#[allow(clippy::too_many_arguments)]
 async fn read_fusion<F: ImuFusion>(
     sensor: &mut Sensor20948<'_>,
     filter: &mut F,
@@ -589,8 +682,13 @@ async fn read_fusion<F: ImuFusion>(
     _armed: bool,
     dt: f32,
     log_counter: &mut u32,
+    dt_stats: &mut DtStats,
+    i2c_stats: &mut DtStats,
 ) -> Option<(UnitQuaternion<f32>, Vector3<f32>, Vector3<f32>)> {
-    match sensor.read().await {
+    let read_start = Instant::now();
+    let read_result = sensor.read().await;
+    i2c_stats.record(read_start.elapsed().as_micros() as f32 / 1_000_000.0);
+    match read_result {
         Ok((accel, gyro)) => {
             let accel = accel_bias.apply(accel);
 
@@ -643,13 +741,18 @@ async fn read_fusion<F: ImuFusion>(
             };
 
             let quat = filter.update_imu(dt, accel_for_fusion, gyro);
+            // background drift bound - see LEVEL_PRIOR_WEIGHT. runs unconditionally, not just
+            // when the accel gate above rejected this sample, since it's cheap and never fights
+            // a real correction (weight is ~15x weaker than accel's own influence on the filter)
+            let quat = libs::level_correction::apply_level_prior(quat, LEVEL_PRIOR_WEIGHT);
 
             *log_counter += 1;
+            dt_stats.record(dt);
             if *log_counter >= crate::LOG_EVERY_N {
                 *log_counter = 0;
                 let (roll, pitch, yaw) = quat.euler_angles();
                 defmt::debug!(
-                    "fusion w: {} x: {} y: {} z: {} | roll: {}° pitch: {}° yaw: {}°",
+                    "fusion w: {} x: {} y: {} z: {} | roll: {}° pitch: {}° yaw: {}° | dt min: {} max: {} avg: {} n: {} | i2c read min: {} max: {} avg: {}",
                     quat.w,
                     quat.i,
                     quat.j,
@@ -657,7 +760,16 @@ async fn read_fusion<F: ImuFusion>(
                     roll * fusion::RAD_TO_DEG,
                     pitch * fusion::RAD_TO_DEG,
                     yaw * fusion::RAD_TO_DEG,
+                    dt_stats.min,
+                    dt_stats.max,
+                    dt_stats.avg(),
+                    dt_stats.n,
+                    i2c_stats.min,
+                    i2c_stats.max,
+                    i2c_stats.avg(),
                 );
+                *dt_stats = DtStats::new();
+                *i2c_stats = DtStats::new();
             }
             Some((quat, gyro, accel))
         }
@@ -740,6 +852,10 @@ pub async fn run_control(
     let mut rate_filter = filters::Lpf3::new(filters::RATE_LPF_HZ);
     #[cfg(not(feature = "dmp"))]
     let mut accel_filter = filters::Lpf3::new_two_pole(filters::ACCEL_LPF_HZ);
+    #[cfg(not(feature = "dmp"))]
+    let mut dt_stats = DtStats::new();
+    #[cfg(not(feature = "dmp"))]
+    let mut i2c_stats = DtStats::new();
 
     // inner rate PIDs
     let mut roll_pid = Pid::new(
@@ -772,9 +888,7 @@ pub async fn run_control(
     loop {
         int_pin.wait_for_high().await;
 
-        // controls/armed/failsafe check runs every tick, independent of whether the DMP
-        // read below succeeds
-        let controls = *wifi::CONTROLS.lock().await;
+        let controls = wifi::CONTROLS.lock(|c| c.get());
         let fresh = controls.is_some_and(|(_, at)| at.elapsed() < Duration::from_millis(500));
         let armed = fresh && controls.is_some_and(|(p, _)| p.armed());
 
@@ -818,6 +932,8 @@ pub async fn run_control(
                 armed,
                 dt,
                 &mut log_counter,
+                &mut dt_stats,
+                &mut i2c_stats,
             )
             .await
             {
@@ -826,14 +942,12 @@ pub async fn run_control(
             };
             (quat, g, dt, accel)
         };
-        #[cfg(not(feature = "telemetry-verbose"))]
-        let _ = &accel;
 
         let euler = quat.euler_angles();
 
-        #[cfg(all(feature = "telemetry-verbose", feature = "dmp"))]
+        #[cfg(feature = "dmp")]
         let bias_snapshot = Vector3::zeros();
-        #[cfg(all(feature = "telemetry-verbose", not(feature = "dmp")))]
+        #[cfg(not(feature = "dmp"))]
         let bias_snapshot = gyro_bias.bias();
 
         // failsafe: zero motors if no packet, packet is stale (>500 ms), or disarmed
@@ -841,7 +955,7 @@ pub async fn run_control(
             Some((p, _)) => p,
             None => {
                 #[cfg(all(feature = "telemetry", not(feature = "telemetry-verbose")))]
-                publish_telemetry(euler, (0, 0, 0, 0), armed, !fresh).await;
+                publish_telemetry(euler, (0, 0, 0, 0), armed, !fresh);
                 #[cfg(feature = "telemetry-verbose")]
                 publish_telemetry(
                     euler,
@@ -853,8 +967,18 @@ pub async fn run_control(
                     bias_snapshot,
                     dt,
                     accel,
-                )
-                .await;
+                );
+                trace_telemetry(
+                    euler,
+                    (0, 0, 0, 0),
+                    armed,
+                    !fresh,
+                    g,
+                    Vector3::zeros(),
+                    bias_snapshot,
+                    dt,
+                    accel,
+                );
                 continue;
             }
         };
@@ -892,7 +1016,7 @@ pub async fn run_control(
         if pkt_throttle < 0.05 {
             motors.turn_off();
             #[cfg(all(feature = "telemetry", not(feature = "telemetry-verbose")))]
-            publish_telemetry(euler, (0, 0, 0, 0), armed, !fresh).await;
+            publish_telemetry(euler, (0, 0, 0, 0), armed, !fresh);
             #[cfg(feature = "telemetry-verbose")]
             publish_telemetry(
                 euler,
@@ -904,8 +1028,18 @@ pub async fn run_control(
                 bias_snapshot,
                 dt,
                 accel,
-            )
-            .await;
+            );
+            trace_telemetry(
+                euler,
+                (0, 0, 0, 0),
+                armed,
+                !fresh,
+                g,
+                Vector3::zeros(),
+                bias_snapshot,
+                dt,
+                accel,
+            );
             continue;
         }
 
@@ -951,35 +1085,12 @@ pub async fn run_control(
         let pitch_torque = pitch_pid.update(pitch_rate_sp - g.y, dt);
         let yaw_torque = yaw_pid.update(yaw_rate_sp - g.z, dt);
 
-        let mut fl = pkt_throttle + roll_torque - pitch_torque + yaw_torque;
-        let mut fr = pkt_throttle - roll_torque - pitch_torque - yaw_torque;
-        let mut rl = pkt_throttle + roll_torque + pitch_torque - yaw_torque;
-        let mut rr = pkt_throttle - roll_torque + pitch_torque + yaw_torque;
-
-        // desaturate: reduce all motors equally so the highest stays at 1.0 (flix desaturate())
-        // look at betaflight: motorMixNormalizationFactor for more advanced motor mixing
-        let max = fl.max(fr).max(rl).max(rr);
-        if max > 1.0 {
-            let excess = max - 1.0;
-            fl -= excess;
-            fr -= excess;
-            rl -= excess;
-            rr -= excess;
-        }
-
-        // disabled: flix doesn't floor individual motors during in-flight mixing either - it
-        // only forces a flat idle when thrustTarget < 0.1 (handled above via the t < 0.05 cutoff)
-        // and otherwise relies on the final per-motor clamp in Motors::set_motors. leaving this
-        // here commented out in case we want it back for a different reason later.
-        // let motor_min = 0.05;
-        // let min = fl.min(fr).min(rl).min(rr);
-        // if min < motor_min {
-        //     let deficit = motor_min - min;
-        //     fl += deficit;
-        //     fr += deficit;
-        //     rl += deficit;
-        //     rr += deficit;
-        // }
+        // betaflight-style two-sided desaturation - see libs::mixer for the derivation, the
+        // real crash it was built to fix (a real flight log showed a motor getting silently
+        // floored while a big correction was active, escalating into full saturation on
+        // multiple motors)
+        let (fl, fr, rl, rr) =
+            libs::mixer::mix_motors(pkt_throttle, roll_torque, pitch_torque, yaw_torque);
 
         let (dfl, dfr, drl, drr) = motors.set_motors(fl, fr, rl, rr);
         defmt::trace!(
@@ -1004,8 +1115,7 @@ pub async fn run_control(
             (dfl as u16, dfr as u16, drl as u16, drr as u16),
             armed,
             false,
-        )
-        .await;
+        );
         #[cfg(feature = "telemetry-verbose")]
         publish_telemetry(
             euler,
@@ -1017,8 +1127,18 @@ pub async fn run_control(
             bias_snapshot,
             dt,
             accel,
-        )
-        .await;
+        );
+        trace_telemetry(
+            euler,
+            (dfl as u16, dfr as u16, drl as u16, drr as u16),
+            armed,
+            false,
+            g,
+            Vector3::new(roll_torque, pitch_torque, yaw_torque),
+            bias_snapshot,
+            dt,
+            accel,
+        );
     }
 }
 
@@ -1046,9 +1166,11 @@ pub async fn run_fusion_visualizer(
         .madgwick()
         .beta(BETA_FILTER)
         .build();
-    let mut gyro_bias = seed_gyro_bias(&mut sensor, &mut int_pin).await;
+    let mut gyro_bias = gyro_bias::seed_gyro_bias(&mut sensor, &mut int_pin).await;
     let mut rate_filter = filters::Lpf3::new(filters::RATE_LPF_HZ);
     let mut accel_filter = filters::Lpf3::new_two_pole(filters::ACCEL_LPF_HZ);
+    let mut dt_stats = DtStats::new();
+    let mut i2c_stats = DtStats::new();
     let mut last_instant: Option<Instant> = None;
     loop {
         int_pin.wait_for_high().await;
@@ -1064,6 +1186,8 @@ pub async fn run_fusion_visualizer(
             false, // no arming concept in the visualizer, motors never spin
             dt,
             &mut log_counter,
+            &mut dt_stats,
+            &mut i2c_stats,
         )
         .await;
         // read_fusion_marg(&mut sensor, &mut fusion_filter, dt, &mut log_counter).await;

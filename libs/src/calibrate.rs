@@ -17,6 +17,8 @@ pub enum CalibrationMode {
     UpsideDown = 5,
     Ended = 6,
     Failed = 7,
+    // no fixed poses - rotate freely through as many orientations as possible
+    MagRotate = 8,
 }
 
 impl core::fmt::Display for CalibrationMode {
@@ -37,6 +39,7 @@ impl CalibrationMode {
             Self::UpsideDown => "upside down",
             Self::Ended => "ended",
             Self::Failed => "failed",
+            Self::MagRotate => "rotate freely (mag calibration)",
         }
     }
 
@@ -60,6 +63,7 @@ impl CalibrationMode {
             5 => Self::UpsideDown,
             6 => Self::Ended,
             7 => Self::Failed,
+            8 => Self::MagRotate,
             _ => return None,
         })
     }
@@ -80,6 +84,7 @@ mod tests {
             CalibrationMode::UpsideDown,
             CalibrationMode::Ended,
             CalibrationMode::Failed,
+            CalibrationMode::MagRotate,
         ] {
             assert_eq!(CalibrationMode::from_bytes(&mode.to_bytes()), Some(mode));
         }

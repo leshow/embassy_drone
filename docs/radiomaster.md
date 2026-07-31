@@ -8,25 +8,28 @@ How to configure a RadioMaster Pocket (EdgeTX) to act as a drop-in USB HID gamep
 
 Without a database entry, gilrs's Linux backend falls back to a fixed positional mapping based on the raw evdev axis/button codes (`native_ev_codes`):
 
-| evdev code          | gilrs axis/button   |
-| ------------------- | ------------------- |
-| `ABS_X`             | `Axis::LeftStickX`  |
-| `ABS_Y`             | `Axis::LeftStickY`  |
-| `ABS_RX`            | `Axis::RightStickX` |
-| `ABS_RY`            | `Axis::RightStickY` |
-| `BTN_START` (0x13b) | `Button::Start`     |
+| evdev code           | gilrs axis/button   |
+| -------------------- | ------------------- |
+| `ABS_X`              | `Axis::LeftStickX`  |
+| `ABS_Y`              | `Axis::LeftStickY`  |
+| `ABS_RX`             | `Axis::RightStickX` |
+| `ABS_RY`             | `Axis::RightStickY` |
+| `BTN_START` (0x13b)  | `Button::Start`     |
+| `BTN_SELECT` (0x13a) | `Button::Select`    |
 
-`ground_control` (`ground_control/src/main.rs:49-69`) maps those to controls:
+`ground_control` (`ground_control/src/main.rs`) maps those to controls:
 
 - `LeftStickY` -> throttle
 - `LeftStickX` -> yaw
 - `RightStickX` -> roll
 - `RightStickY` -> pitch
-- `Button::Start` -> toggles armed
+- `Button::Start` -> toggles armed (momentary press, matches a real Xbox controller's Start button)
+- `Button::Select` -> armed follows the switch position directly (pressed = armed, released = disarmed), but only from a gamepad whose USB vendor/product id matches the Pocket's (`1209:4f54`) - so an Xbox controller's Back/View button, which also reports as `Button::Select`, can never trigger it
 
-So the goal is just: configure the Pocket's USB joystick output to match this
-table exactly, and gilrs/`ground_control` will treat it identically to any
-other gamepad.
+So the axis layout is just: configure the Pocket's USB joystick output to
+match this table exactly, and gilrs/`ground_control` will treat it
+identically to any other gamepad. The arm/disarm switch below relies on the
+device-id check already built into `ground_control`, not on more config here.
 
 ## Use a dedicated Model
 
@@ -78,12 +81,19 @@ Three ways to proceed, roughly in order of effort:
 
    Leave every other channel `None` for now.
 
-1. Arm/disarm button: pick a spare channel, set its source to a momentary
-   control (the Pocket's **SE** button is a good fit - it's momentary, not
-   latching, so each press cleanly toggles arm state without a mismatch
-   between switch position and armed state). Set that channel's type to
-   **Btn**, button number **12** (HID button usage 12 -> evdev `BTN_START` ->
-   gilrs `Button::Start`).
+1. Arm/disarm: `ground_control` supports two independent controls here, wire
+   up either or both:
+   - **SE** (momentary button): a good fit precisely because it's momentary,
+     not latching - each press cleanly toggles arm state without a mismatch
+     between switch position and armed state. Pick a spare channel, set its
+     source to SE, channel type **Btn**, button number **12** (HID button
+     usage 12 -> evdev `BTN_START` -> gilrs `Button::Start`).
+   - **SA** (2-position switch): a real latching switch, so `ground_control`
+     treats it as a live level rather than a toggle - armed always matches
+     SA's current position, up or down, even across a USB reconnect. Pick a
+     different spare channel, set its source to SA, channel type **Btn**,
+     button number **11** (HID button usage 11 -> evdev `BTN_SELECT` -> gilrs
+     `Button::Select`).
 1. If an axis reads backwards (e.g. throttle low at stick-up), use the invert
    control inside this same USB Joystick screen (not the Mixer's channel
    weight) - it only affects how the value is packaged into the HID report,
@@ -117,18 +127,21 @@ channel number**, rather than assigning an axis to an existing channel:
 3. In the Mixer, set up these channels (delete/reassign whatever the default
    template put on CH1/2/4/5 first):
 
-   | Channel | Source                               | -> Axis (Classic order)  |
-   | ------- | ------------------------------------ | ------------------------ |
-   | CH1     | Rudder / yaw (left stick, horiz)     | X                        |
-   | CH2     | Throttle (left stick, vert)          | Y                        |
-   | CH4     | Aileron / roll (right stick, horiz)  | rotX                     |
-   | CH5     | Elevator / pitch (right stick, vert) | rotY                     |
-   | CH20    | **SE** button (momentary)            | button 12 -> `BTN_START` |
+   | Channel | Source                               | -> Axis (Classic order)   |
+   | ------- | ------------------------------------ | ------------------------- |
+   | CH1     | Rudder / yaw (left stick, horiz)     | X                         |
+   | CH2     | Throttle (left stick, vert)          | Y                         |
+   | CH4     | Aileron / roll (right stick, horiz)  | rotX                      |
+   | CH5     | Elevator / pitch (right stick, vert) | rotY                      |
+   | CH19    | **SA** switch (2-position)           | button 11 -> `BTN_SELECT` |
+   | CH20    | **SE** button (momentary)            | button 12 -> `BTN_START`  |
 
-   Leave CH3, CH6-19 unassigned - Z/rotZ (CH3/CH6) aren't read by
+   Leave CH3, CH6-18 unassigned - Z/rotZ (CH3/CH6) aren't read by
    `ground_control`, and gilrs doesn't care about gaps in the button range.
-   SE is used for arm/disarm because it's momentary (press+release), so it
-   toggles cleanly without a switch-position/armed-state mismatch
+   CH19/SA and CH20/SE are independent arm/disarm controls - wire up either
+   or both. SE toggles arm on each press (momentary, so no
+   switch-position/armed-state mismatch); SA's position is read live, so
+   armed always matches wherever the switch currently sits.
 
 4. If an axis reads backwards (e.g. throttle low at stick-up), fix it on the
    same Mixer line with **Weight -100%** instead of a dedicated invert

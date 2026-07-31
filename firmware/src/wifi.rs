@@ -1,14 +1,14 @@
 extern crate alloc;
 
 use alloc::string::ToString;
-use core::{net::Ipv4Addr, str::FromStr};
+use core::{cell::Cell, net::Ipv4Addr, str::FromStr};
 
 use embassy_executor::Spawner;
 use embassy_net::{
     Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4,
     udp::{PacketMetadata, UdpSocket},
 };
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
+use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 use embassy_time::Instant;
 use esp_hal::{peripherals::WIFI, rng::Rng};
 use esp_radio::wifi::{
@@ -21,14 +21,14 @@ use libs::telemetry::TelemetryPacket;
 use static_cell::StaticCell;
 
 // latest control input from ground control, stamped at receive time for failsafe
-pub static CONTROLS: Mutex<CriticalSectionRawMutex, Option<(ControlPacket, Instant)>> =
-    Mutex::new(None);
+pub static CONTROLS: Mutex<CriticalSectionRawMutex, Cell<Option<(ControlPacket, Instant)>>> =
+    Mutex::new(Cell::new(None));
 
 // latest telemetry snapshot from the flight loop, sent back to ground control on each
 // received control packet. None until the flight loop has produced a first sample.
 #[cfg(feature = "telemetry")]
-pub static TELEMETRY: Mutex<CriticalSectionRawMutex, Option<(TelemetryPacket, Instant)>> =
-    Mutex::new(None);
+pub static TELEMETRY: Mutex<CriticalSectionRawMutex, Cell<Option<(TelemetryPacket, Instant)>>> =
+    Mutex::new(Cell::new(None));
 
 macro_rules! mk_static {
     ($t:ty, $val:expr) => {{
@@ -151,10 +151,10 @@ async fn udp_control_task(stack: Stack<'static>) {
             Ok((n, meta)) if n == control::DEFAULT_SIZE => {
                 if let Some(packet) = ControlPacket::from_bytes(&buf) {
                     defmt::trace!("packet received {:?}", defmt::Debug2Format(&packet));
-                    *CONTROLS.lock().await = Some((packet, Instant::now()));
+                    CONTROLS.lock(|c| c.set(Some((packet, Instant::now()))));
                 }
                 #[cfg(feature = "telemetry")]
-                if let Some((pkt, _ts)) = *TELEMETRY.lock().await
+                if let Some((pkt, _ts)) = TELEMETRY.lock(|c| c.get())
                     && let Err(err) = soc.send_to(&pkt.to_bytes(), meta.endpoint).await
                 {
                     defmt::warn!(

@@ -38,12 +38,15 @@ nalgebra = { version = "0.35", default-features = false, features = [
 libs = { path = "../libs", default-features = false }
 
 [features]
-default = ["c3", "telemetry"]
+default = ["c3"]
 calibrate = [
 ] # you will also have to manually edit the .cargo/config.toml to remove --monitor
 test_motors = []
 dmp = []
 visualize = []
+# magnetometer support - init'd on hardware, and (with calibrate) runs mag calibration.
+# on its own (without calibrate) does nothing yet - live-flight mag fusion isn't wired up
+mag = []
 telemetry = ["libs/telemetry"]
 telemetry-verbose = ["telemetry", "libs/telemetry-verbose"]
 c3 = [

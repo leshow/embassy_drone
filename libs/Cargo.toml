@@ -6,16 +6,14 @@ edition = "2024"
 [dependencies]
 nalgebra = { version = "0.35", default-features = false, features = [
 	"libm-force",
-], optional = true }
+] }
 
 [dev-dependencies]
 # cross-checks icm20948's Quaternion::to_euler_angles against nalgebra's
 # UnitQuaternion::euler_angles - test-only, not part of the published dependency graph
 icm20948-rs = { version = "0.2.3", features = ["dmp"] }
-nalgebra = "0.35"
 
 [features]
-# no default here - firmware/ground_control forward their own default selection via
-# `libs/telemetry` on their dependency declaration, so libs itself stays opinion-free
+# no default here - firmware/ground_control forward their own default selection
 telemetry = []
-telemetry-verbose = ["telemetry", "dep:nalgebra"]
+telemetry-verbose = ["telemetry"]
