@@ -7,26 +7,27 @@ extern crate alloc;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_time::Timer;
+use embedded_hal_bus::spi::ExclusiveDevice;
 use esp_backtrace as _;
 use esp_hal::{
     Async, gpio,
-    i2c::master::{Config as I2cConfig, I2c},
     interrupt::software::SoftwareInterruptControl,
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed,
         timer::{self, TimerIFace, config::Duty},
     },
     peripherals::LEDC,
-    ram,
+    spi::master::Spi,
+    system::Stack,
     time::Rate,
     timer::timg::TimerGroup,
 };
 use esp_println as _;
+use esp_rtos::embassy::Executor;
 use static_cell::StaticCell;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-mod accel_hw_offset;
 mod calibration_storage;
 mod flight;
 mod fusion;
@@ -35,7 +36,7 @@ mod panic_safety;
 mod sensors;
 mod wifi;
 
-use crate::{flight::AccelBias, motors::Motors, sensors::Sensor, wifi::AP};
+use crate::{flight::AccelBias, motors::Motors, sensors::Sensor};
 
 const LOOP_PERIOD_MS: u64 = 1; // 1000Hz target loop rate; shared by timer and Madgwick sample_period
 // if changing duty cycle, change this value. currently 10 bit resolution
@@ -58,7 +59,7 @@ const fn parse_u64(s: &str) -> u64 {
 }
 
 /// How many loop iterations to skip between log lines.
-/// Override at build time: `LOG_RATE_MS=200 cargo flash-c3` (default: 500 ms).
+/// Override at build time: `LOG_RATE_MS=200 cargo flash-s3` (default: 500 ms).
 const LOG_EVERY_N: u32 = {
     let ms = match option_env!("LOG_RATE_MS") {
         Some(s) => parse_u64(s),
@@ -99,14 +100,40 @@ const fn pwm_duty_config(bits: u32) -> Duty {
     }
 }
 
+type SpiSensor<'a> = ExclusiveDevice<Spi<'a, Async>, gpio::Output<'a>, embassy_time::Delay>;
+
+#[cfg(feature = "mag")]
+pub(crate) type Sensor20948<'a> = Sensor<
+    icm20948_async::Icm20948<icm20948_async::SpiDevice<SpiSensor<'a>>, icm20948_async::MagEnabled>,
+>;
+
+#[cfg(not(feature = "mag"))]
+pub(crate) type Sensor20948<'a> = Sensor<
+    icm20948_async::Icm20948<icm20948_async::SpiDevice<SpiSensor<'a>>, icm20948_async::MagDisabled>,
+>;
+
+// runs on core 1: everything WiFi-related. Kept off core 0 so the flight loop never competes
+// with WiFi/UDP tasks for time on a shared executor - see docs/s3-migration.md "Dual executor"
+#[cfg(not(feature = "visualize"))]
+#[embassy_executor::task]
+async fn wifi_core_task(wifi: esp_hal::peripherals::WIFI<'static>, spawner: Spawner) {
+    let ap = wifi::AP::init(wifi, spawner).await;
+    #[cfg(not(feature = "calibrate"))]
+    ap.listen_control(spawner);
+    #[cfg(feature = "calibrate")]
+    ap.listen_calibrate(spawner);
+}
+
 #[esp_rtos::main]
-async fn main(spawner: Spawner) {
+async fn main(_spawner: Spawner) {
+    // WiFi tasks get their own spawner on core 1 (see wifi_core_task) - core 0's spawner is
+    // unused since main() drives the flight loop directly rather than spawning it as a task
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
     // wifi heap only needed when running the AP, visualize mode just logs over USB
     #[cfg(not(feature = "visualize"))]
     {
-        esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
+        esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
         esp_alloc::heap_allocator!(size: 36 * 1024);
     }
 
@@ -115,36 +142,60 @@ async fn main(spawner: Spawner) {
     esp_rtos::start(timg0.timer0, sw_int.software_interrupt0);
 
     #[cfg(not(feature = "visualize"))]
-    let ap = AP::init(peripherals.WIFI, spawner).await;
-    #[cfg(not(any(feature = "calibrate", feature = "visualize")))]
-    ap.listen_control(spawner);
-    #[cfg(feature = "calibrate")]
-    ap.listen_calibrate(spawner);
+    {
+        static APP_CORE_STACK: StaticCell<Stack<8192>> = StaticCell::new();
+        let app_core_stack = APP_CORE_STACK.init(Stack::new());
 
-    let i2c = I2c::new(
-        peripherals.I2C0,
-        I2cConfig::default().with_frequency(Rate::from_khz(400)),
+        esp_rtos::start_second_core(
+            peripherals.CPU_CTRL,
+            sw_int.software_interrupt1,
+            app_core_stack,
+            move || {
+                static EXECUTOR: StaticCell<Executor> = StaticCell::new();
+                let executor = EXECUTOR.init(Executor::new());
+                executor.run(|core1_spawner| {
+                    core1_spawner.spawn(wifi_core_task(peripherals.WIFI, core1_spawner).unwrap());
+                });
+            },
+        );
+    }
+
+    // Wait for ICM20948 to power up before touching SPI at all
+    Timer::after_millis(1000).await;
+
+    // S3's actual IO_MUX FSPI pins - not GPIO-matrix routed, so no repeat of the C3 matrix-input
+    // -delay ceiling that capped reliable SPI clock there. GPIO10=CS, GPIO11=MOSI, GPIO12=SCLK,
+    // GPIO13=MISO, GPIO6=interrupt, GPIO1-4=motors (rear left/rear right/front left/front right)
+    let spi = Spi::new(
+        peripherals.SPI2,
+        esp_hal::spi::master::Config::default().with_frequency(Rate::from_mhz(3)), // 3mhz sems reliable, faster crashed whoami on imu startup
     )
-    .unwrap()
-    .with_sda(peripherals.GPIO20)
-    .with_scl(peripherals.GPIO21)
+    .expect("failed to start spi")
+    .with_sck(peripherals.GPIO12)
+    .with_mosi(peripherals.GPIO11)
+    .with_miso(peripherals.GPIO13)
     .into_async();
 
-    // Wait for ICM20948 to power up before init
-    Timer::after_millis(1000).await;
+    let cs = gpio::Output::new(
+        peripherals.GPIO10,
+        gpio::Level::High,
+        gpio::OutputConfig::default(),
+    );
+    let spi_device = ExclusiveDevice::new(spi, cs, embassy_time::Delay)
+        .expect("failed to create SPI exclusive device");
 
     // normal run scenario
     #[cfg(not(any(feature = "calibrate", feature = "visualize")))]
     {
         let int_pin = gpio::Input::new(peripherals.GPIO6, gpio::InputConfig::default());
         run(
-            i2c,
+            spi_device,
             peripherals.LEDC,
             peripherals.FLASH,
-            peripherals.GPIO1,  // rear left
-            peripherals.GPIO3,  // rear right
-            peripherals.GPIO10, // front left
-            peripherals.GPIO9,  // front right
+            peripherals.GPIO1, // rear left
+            peripherals.GPIO2, // rear right
+            peripherals.GPIO3, // front left
+            peripherals.GPIO4, // front right
             int_pin,
         )
         .await;
@@ -154,7 +205,7 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "calibrate")]
     {
         // ICM20948
-        let mut sensor = Sensor::init_icm20948(i2c)
+        let mut sensor = Sensor::init_icm20948(spi_device)
             .await
             .expect("ICM20948 init failed");
         let mut flash_storage = esp_storage::FlashStorage::new(peripherals.FLASH);
@@ -221,12 +272,12 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "visualize")]
     {
         let int_pin = gpio::Input::new(peripherals.GPIO6, gpio::InputConfig::default());
-        run_visualizer(i2c, peripherals.FLASH, int_pin).await;
+        run_visualizer(spi_device, peripherals.FLASH, int_pin).await;
     }
 }
 
 async fn run(
-    i2c: I2c<'_, esp_hal::Async>,
+    spi: SpiSensor<'_>,
     ledc: LEDC<'static>,
     flash: esp_hal::peripherals::FLASH<'static>,
     rear_left_pin: impl gpio::interconnect::PeripheralOutput<'static>,
@@ -261,7 +312,7 @@ async fn run(
     .await;
     // ICM20948
     // gyro bias is tracked continuously in flight::run_control
-    let sensor = match Sensor::init_icm20948(i2c).await {
+    let sensor = match Sensor::init_icm20948(spi).await {
         Ok(s) => s,
         Err(e) => {
             defmt::error!("ICM20948 init failed: {}", defmt::Debug2Format(&e));
@@ -283,26 +334,22 @@ async fn run(
     flight::run_control(sensor, int_pin, motors, accel_bias).await;
 }
 
-pub(crate) type Sensor20948<'a> =
-    Sensor<icm20948::Icm20948Driver<icm20948::I2cInterface<I2c<'a, Async>>>>;
-
 #[cfg(feature = "visualize")]
 async fn run_visualizer(
-    i2c: I2c<'_, esp_hal::Async>,
-    #[cfg_attr(feature = "dmp", allow(unused))] flash: esp_hal::peripherals::FLASH<'static>,
+    spi: SpiSensor<'_>,
+    flash: esp_hal::peripherals::FLASH<'static>,
     int_pin: gpio::Input<'static>,
 ) {
-    let sensor = Sensor::init_icm20948(i2c)
-        .await
-        .expect("ICM20948 init failed");
+    let sensor = match Sensor::init_icm20948(spi).await {
+        Ok(s) => s,
+        Err(e) => {
+            defmt::error!("ICM20948 init failed: {}", defmt::Debug2Format(&e));
+            panic!("ICM20948 init failed");
+        }
+    };
 
-    #[cfg(feature = "dmp")]
-    flight::run_dmp_visualizer(sensor, int_pin).await;
-    #[cfg(not(feature = "dmp"))]
-    {
-        let mut flash_storage = esp_storage::FlashStorage::new(flash);
-        let accel_bias =
-            calibration_storage::load_accel_calibration(&mut flash_storage).unwrap_or_default();
-        flight::run_fusion_visualizer(sensor, int_pin, accel_bias).await;
-    }
+    let mut flash_storage = esp_storage::FlashStorage::new(flash);
+    let accel_bias =
+        calibration_storage::load_accel_calibration(&mut flash_storage).unwrap_or_default();
+    flight::run_fusion_visualizer(sensor, int_pin, accel_bias).await;
 }

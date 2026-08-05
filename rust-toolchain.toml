@@ -1,10 +1,8 @@
 [toolchain]
-# stable covers all RISC-V targets (C3, C6).
-# S3 (Xtensa) requires channel = "esp" — use a subdirectory with its own
-# rust-toolchain.toml rather than switching this file.
-channel = "stable"
+# S3 (Xtensa) requires this "esp" channel, installed via espup - it's not part
+# of upstream Rust. Install: `cargo install espup && espup install`, then
+# source the LIBCLANG_PATH/PATH exports it prints (or ~/export-esp.sh) before
+# building.
+channel = "esp"
 components = ["rustfmt", "clippy"]
-targets = [
-	"riscv32imc-unknown-none-elf",  # ESP32-C3
-	"riscv32imac-unknown-none-elf", # ESP32-C6
-]
+targets = ["xtensa-esp32s3-none-elf"]

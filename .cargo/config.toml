@@ -1,4 +1,4 @@
-[target.'cfg(target_arch = "riscv32")']
+[target.'cfg(target_arch = "xtensa")']
 runner = "espflash flash --monitor --log-format defmt"
 # To pin a specific port: runner = "espflash flash --monitor --port /dev/ttyUSB0"
 rustflags = [
@@ -11,16 +11,14 @@ rustflags = [
 ]
 
 [alias]
-# c3
-build-c3 = "build -p embassy_quad --release --target riscv32imc-unknown-none-elf"
-flash-c3 = "run   -p embassy_quad --release --target riscv32imc-unknown-none-elf"
-build-c3-dmp = "build -p embassy_quad --release --target riscv32imc-unknown-none-elf --no-default-features --features c3,dmp,telemetry"
-flash-c3-dmp = "run   -p embassy_quad --release --target riscv32imc-unknown-none-elf --no-default-features --features c3,dmp,telemetry"
-# c6
-build-c6 = "build -p embassy_quad --release --no-default-features --features c6 --target riscv32imac-unknown-none-elf"
-flash-c6 = "run   -p embassy_quad --release --no-default-features --features c6 --target riscv32imac-unknown-none-elf"
-build-c6-fusion = "build -p embassy_quad --release --target riscv32imac-unknown-none-elf --no-default-features --features c6,telemetry"
-flash-c6-fusion = "run -p embassy_quad --release --target riscv32imac-unknown-none-elf --no-default-features --features c6,telemetry"
+# -Z build-std is required: the distributed Xtensa Rust toolchain only ships a prebuilt std for
+# the host (x86_64-unknown-linux-gnu), not for xtensa-esp32s3-none-elf - confirmed directly from
+# the release archive's own component manifest, no prebuilt target std exists to install. core/
+# alloc get built from source instead, using the rust-src component (already present).
+build-s3 = "build -p embassy_quad --release --target xtensa-esp32s3-none-elf -Z build-std=core,alloc"
+flash-s3 = "run   -p embassy_quad --release --target xtensa-esp32s3-none-elf -Z build-std=core,alloc"
+build-s3-fusion = "build -p embassy_quad --release --target xtensa-esp32s3-none-elf -Z build-std=core,alloc --features telemetry"
+flash-s3-fusion = "run -p embassy_quad --release --target xtensa-esp32s3-none-elf -Z build-std=core,alloc --features telemetry"
 
 # helpers
 ground_control = "build --manifest-path ground_control/Cargo.toml --target x86_64-unknown-linux-gnu"

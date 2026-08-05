@@ -1,5 +1,6 @@
 {
-    "rust-analyzer.cargo.target": "riscv32imc-unknown-none-elf",
-    "rust-analyzer.cargo.features": ["c3", "telemetry"],
-    "rust-analyzer.check.allTargets": false
+    "rust-analyzer.cargo.features": ["s3", "telemetry", "mag", "test_motors"],
+    "rust-analyzer.check.allTargets": false,
+    "rust-analyzer.cargo.target": "xtensa-esp32s3-none-elf",
+    "rust-analyzer.cargo.extraArgs": ["-Z", "build-std=core,alloc"]
 }

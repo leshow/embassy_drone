@@ -1,15 +1,15 @@
 [workspace]
 members = ["firmware", "libs"]
-# excluded because the yare x86 targets
-exclude = ["ground_control", "visualizer"]
+# ground_control/visualizer excluded because they're x86 targets; icm20948-async is a vendored
+# path dependency, not a real workspace member
+exclude = ["ground_control", "visualizer", "vendor/icm20948-async"]
 resolver = "2"
 
 [patch.crates-io]
 mpu9250-async = { path = "vendor/mpu9250-async" }
-# icm20948-rs = { path = "../ICM-20948-rs" }
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 
 [profile.dev]
 # needed to fit in RAM even in debug builds

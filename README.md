@@ -1,6 +1,6 @@
 # mini quadcopter in Rust w/ embassy for esp32 (WIP)
 
-currently still a work in progress, building a (very) mini quadcopter for esp32 on bare metal with [embassy.dev](https://embassy.dev). right now using the esp32-c3 supermini, I may upgrade this to the s3 if the extra core is necessary.
+currently still a work in progress, building a (very) mini quadcopter for esp32 on bare metal with [embassy.dev](https://embassy.dev). running on the esp32-s3 - the extra core lets the flight loop and WiFi run fully independently, and the hardware FPU matters a lot for the fusion/filter math (see `docs/s3-migration.md`).
 
 ## Quad assets
 
@@ -20,16 +20,16 @@ I've printed in PLA, PETG and PETG-CF & GF. PLA seems totally fine, the drone fr
 
 ## Parts list
 
-### Microcontrollers (choose one)
+### Microcontroller
 
-Currently only building on the c3 and c6. I'll try the s3 if I have time to attempt a build on the xtensa cores but RISC-V is better supported by embassy & Rust. The s3 supermini might be interesting because it's dual-core and has the same footprint as the c3.
+S3-only - the earlier C3/C6 (RISC-V) builds were dropped in favor of the
+S3's hardware FPU and second core. Needs the Xtensa toolchain (`espup`),
+not plain `rustup` - see `docs/s3-migration.md` for the full writeup and
+rationale.
 
-| Part               | Chip     | Cores   | Flash  | RAM        | WiFi      | Notes                                                          |
-| ------------------ | -------- | ------- | ------ | ---------- | --------- | -------------------------------------------------------------- |
-| ESP32-C3 SuperMini | ESP32-C3 | 1× RV32 | 4 MB   | 400 KB     | 2.4 GHz   | **Current build** - `c3` feature                               |
-| ESP32-C6 SuperMini | ESP32-C6 | 1× RV32 | 4 MB   | 512 KB     | 2.4/5 GHz | Drop-in upgrade - `c6` feature                                 |
-| ESP32-S3 (16R8)    | ESP32-S3 | 2× LX7  | 16 MB  | 8 MB PSRAM | 2.4 GHz   | Dual-core; needs Xtensa toolchain - see `docs/s3-migration.md` |
-| ESP32-S3 Mini      | ESP32-S3 | 2× LX7  | 4/8 MB | - / 2 MB   | 2.4 GHz   | Compact form factor                                            |
+| Part     | Chip     | Cores  | Flash | RAM        | WiFi    | Notes                      |
+| -------- | -------- | ------ | ----- | ---------- | ------- | -------------------------- |
+| ESP32-S3 | ESP32-S3 | 2x LX7 | 4+ MB | 512K+PSRAM | 2.4 GHz | Current build - s3 feature |
 
 ### IMU Sensors (choose)
 
@@ -52,29 +52,26 @@ Requires [espflash](https://github.com/esp-rs/espflash) for flashing (`cargo ins
 
 \*I tried with a 503040 3.7v lipo recycled from a keyboard build but the BMS (battery management system) on it will automatically shut off after a few seconds. It's not really build to power these motors.
 
-### ESP32-C3 (default)
+### ESP32-S3 (default)
+
+Needs the Xtensa toolchain, not plain `rustup`:
 
 ```sh
-cargo build -p embassy_quad --target riscv32imc-unknown-none-elf
-cargo run -p embassy_quad --target riscv32imc-unknown-none-elf
+cargo install espup
+espup install
+# then source the exports it prints (or ~/export-esp.sh) before building
+```
+
+```sh
+cargo build -p embassy_quad --target xtensa-esp32s3-none-elf
+cargo run -p embassy_quad --target xtensa-esp32s3-none-elf
 ```
 
 Or using the aliases:
 
 ```sh
-cargo build-c3
-cargo flash-c3
-```
-
-### ESP32-C6
-
-The C6 uses a different RISC-V target (`riscv32imac` vs `riscv32imc`). The
-`c3` and `c6` features are mutually exclusive — always use
-`--no-default-features` when building for C6 to avoid activating both:
-
-```sh
-cargo build-c6
-cargo flash-c6
+cargo build-s3
+cargo flash-s3
 ```
 
 See .cargo/config.toml to see expansion of aliases
@@ -84,7 +81,7 @@ See .cargo/config.toml to see expansion of aliases
 `DEFMT_LOG` is read at compile time by `esp-println`:
 
 ```sh
-DEFMT_LOG=debug cargo flash-c3
+DEFMT_LOG=debug cargo flash-s3
 ```
 
 ### Throttle cap
@@ -96,15 +93,15 @@ DEFMT_LOG=debug cargo flash-c3
 to see a 3d rendering of the orientation run:
 
 ```bash
-DEFMT_LOG="info" LOG_RATE_MS=1 cargo flash-c3 --features visualize | (cd visualizer && cargo run)
+DEFMT_LOG="info" LOG_RATE_MS=1 cargo flash-s3 --features visualize | (cd visualizer && cargo run)
 ```
 
 It feeds the esp32 log output to a binary reading stdin and rendering a cube on screen
 
-By default, sensor readings from the ICM-20948 are sent to the ESP32-C3 where either a Madgwick filter fuses accel and gyro data in software to correct orientation or the IMU's DMP is used to get the already fused output (`dmp` feature is on by default). The ICM-20948 also has an onboard DMP that fuses data directly on the sensor board. Output looks pretty good and doesn't have the yaw drift that the software fusion does when the magnetometer is enabled.
+Sensor readings from the ICM-20948 (over SPI) are sent to the ESP32-S3, where a Madgwick filter fuses accel and gyro data in software to correct orientation. (Earlier versions could also offload fusion to the ICM-20948's onboard DMP; that path has been dropped in favor of `peterkrull/icm20948-async`, which doesn't support the DMP.)
 
 ```sh
-DEFMT_LOG="info" LOG_RATE_MS=1 cargo flash-c3 --features visualize | (cd visualizer && cargo run)
+DEFMT_LOG="info" LOG_RATE_MS=1 cargo flash-s3 --features visualize | (cd visualizer && cargo run)
 ```
 
 ## Ground control
@@ -150,7 +147,7 @@ RUST_LOG="info" GATEWAY_IP=192.168.4.1 UDP_PORT=4444 cargo run --release
 flash calibration:
 
 ```sh
-DEFMT_LOG="debug" LOG_RATE_MS=100 AP_PASSWORD="testtest" cargo flash-c3 --features calibrate
+DEFMT_LOG="debug" LOG_RATE_MS=100 AP_PASSWORD="testtest" cargo flash-s3 --features calibrate
 ```
 
 You can then either leave the quad plugged in or unplug and calibrate using the wifi outputs, either way, you need to connect ground_control

@@ -1,10 +1,15 @@
 #![allow(unused)]
 
+use core::fmt::Debug;
+
 use embedded_hal_async::i2c::I2c;
-use icm20948::{
-    AccelCalibration, AccelConfig, AccelDlpf, AccelFullScale, GyroCalibration, GyroConfig,
-    GyroDlpf, GyroFullScale, I2cInterface, Icm20948Driver, MagConfig,
-    interrupt::{InterruptConfig, InterruptPinConfig},
+#[cfg(not(feature = "mag"))]
+use icm20948_async::MagDisabled;
+#[cfg(feature = "mag")]
+use icm20948_async::MagEnabled;
+use icm20948_async::{
+    AccDlp, AccRange, AccUnit, GyrDlp, GyrRange, GyrUnit, Icm20948, IcmBuilder, SetupError,
+    SpiDevice, Transport,
 };
 use mpu9250_async::{Mpu6050, Mpu6050Error};
 use nalgebra::{Vector2, Vector3};
@@ -48,161 +53,79 @@ impl<I: I2c> ImuRead for Sensor<Mpu6050<I>> {
 
 // ICM20948 (9DOF, with mag) ---
 
-impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
-    pub async fn init_icm20948(i2c: I) -> Result<Self, icm20948::Error<I::Error>> {
-        let interface = I2cInterface::alternative(i2c);
-        let mut driver = Icm20948Driver::new(interface);
-        driver.verify_who_am_i().await?;
-        driver.init(&mut embassy_time::Delay).await?;
+// divider=1 -> gyro ~550Hz (1100/2), accel ~562Hz (1125/2). gyro DLPF is Hz196: the real noise
+// filtering is done downstream by the tunable, per-tick RATE_LPF_HZ software filter (see
+// flight.rs), so the hardware DLPF just needs to be wide enough not to add its own phase lag
+// on top - a narrower cutoff here would be redundant filtering that only costs delay.
+#[cfg(feature = "mag")]
+impl<SPI: embedded_hal_async::spi::SpiDevice> Sensor<Icm20948<SpiDevice<SPI>, MagEnabled>> {
+    pub async fn init_icm20948(spi: SPI) -> Result<Self, SetupError<SPI::Error>> {
+        let mut driver = IcmBuilder::new_spi(spi, embassy_time::Delay)
+            .acc_range(AccRange::Gs4)
+            .acc_dlp(AccDlp::Hz111)
+            .acc_odr(0)
+            .acc_unit(AccUnit::Gs)
+            .gyr_range(GyrRange::Dps1000)
+            .gyr_dlp(GyrDlp::Hz196)
+            .gyr_odr(0)
+            .gyr_unit(GyrUnit::Rps)
+            .initialize_9dof()
+            .await?;
 
-        // DMP locks full scale (gyro=2000dps, accel=±4g) and ODR via dmp_configure;
-        // only DLPF settings survive into DMP mode.
-        // Non-DMP mode uses ±500dps/±4g with loop-rate-based ODR dividers.
-        #[cfg(feature = "dmp")]
-        {
-            // accel 111Hz / gyro 51Hz DLPF — full_scale and sample_rate_div
-            // are overwritten by dmp_configure; only DLPF survives into DMP mode
-            driver
-                .configure_accelerometer(AccelConfig {
-                    full_scale: AccelFullScale::G4,
-                    dlpf: AccelDlpf::Hz111,
-                    dlpf_enable: true,
-                    sample_rate_div: 0,
-                })
-                .await?;
-            driver
-                .configure_gyroscope(GyroConfig {
-                    full_scale: GyroFullScale::Dps2000,
-                    dlpf: GyroDlpf::Hz51,
-                    dlpf_enable: true,
-                    sample_rate_div: 0,
-                })
-                .await?;
-        }
-        #[cfg(not(feature = "dmp"))]
-        {
-            // divider=1 -> gyro ~550Hz (1100/2), accel ~562Hz (1125/2)
-            driver
-                .configure_accelerometer(AccelConfig {
-                    full_scale: AccelFullScale::G4,
-                    dlpf: AccelDlpf::Hz111,
-                    dlpf_enable: true,
-                    sample_rate_div: 1,
-                })
-                .await?;
-            // 500deg/s gives finer resolution than 2000dps for stable hover corrections;
-            driver
-                .configure_gyroscope(GyroConfig {
-                    full_scale: GyroFullScale::Dps1000,
-                    dlpf: GyroDlpf::Hz197,
-                    dlpf_enable: true,
-                    sample_rate_div: 1,
-                })
-                .await?;
-
-            // raw data-ready interrupt on the same INT pin the DMP path uses, so the
-            // flight loop can stay interrupt-driven instead of a fixed timer
-            driver
-                .configure_interrupt_pin(&InterruptPinConfig {
-                    active_low: false,
-                    open_drain: false,
-                    latch_enabled: true,
-                    clear_on_any_read: true,
-                })
-                .await?;
-            driver
-                .configure_interrupts(&InterruptConfig {
-                    raw_data_ready: true,
-                    ..Default::default()
-                })
-                .await?;
-            #[cfg(feature = "mag")]
-            driver
-                .init_magnetometer(MagConfig::default(), &mut embassy_time::Delay)
-                .await
-                .inspect_err(|e| {
-                    defmt::error!(
-                        "error initializing magnetometer: {}",
-                        defmt::Debug2Format(e)
-                    );
-                })?;
-        }
-
-        #[cfg(feature = "dmp")]
-        {
-            use defmt::info;
-            use embassy_time::Delay;
-            use icm20948::dmp::DmpConfig;
-
-            // set DMP hz cycle here
-            let dmp_hz = 100;
-            let mut int_cfg = InterruptConfig::data_ready_only();
-            int_cfg.dmp = true;
-            driver.configure_interrupts(&int_cfg).await.unwrap();
-
-            info!("Loading DMP firmware and configuring...");
-            driver.dmp_init(&mut Delay).await.unwrap();
-            driver.dmp_init_magnetometer(&mut Delay).await.unwrap();
-            // active-high push-pull — no pull resistor needed on the INT wire
-            driver
-                .configure_interrupt_pin(&InterruptPinConfig {
-                    active_low: false,
-                    open_drain: false,
-                    latch_enabled: true,
-                    clear_on_any_read: true,
-                })
-                .await?;
-            driver
-                .configure_interrupts(&InterruptConfig {
-                    dmp: true,
-                    ..Default::default()
-                })
-                .await?;
-
-            let dmp_config = DmpConfig::six_axis()
-                .with_calibrated_gyro()
-                // .with_calibrated_mag()
-                .with_sample_rate(dmp_hz);
-
-            driver.dmp_configure(&dmp_config).await.unwrap();
-            driver.reset_fifo().await.unwrap();
-            driver.dmp_enable(true).await?;
-            embassy_time::Timer::after(embassy_time::Duration::from_millis(10)).await;
-            // clear any interrupt that fired before we started listening
-            let _ = driver.read_interrupt_status().await;
-            defmt::info!("ICM20948 DMP enabled {}Hz", dmp_hz);
-        }
+        // raw data-ready interrupt on the INT pin, so the flight loop can stay
+        // interrupt-driven instead of a fixed timer
+        driver.enable_data_ready_interrupt().await?;
+        // SPI-only: stop the shared SDA/SCL-vs-SDI/SCLK pins from being mistaken for I2C traffic
+        driver.disable_i2c_interface().await?;
 
         defmt::info!("ICM20948 init OK");
         Ok(Self { driver })
     }
+}
 
-    pub async fn read_dmp(
-        &mut self,
-    ) -> Result<Option<icm20948::dmp::DmpData>, icm20948::Error<I::Error>> {
-        self.driver.dmp_read_fifo().await
-    }
+#[cfg(not(feature = "mag"))]
+impl<SPI: embedded_hal_async::spi::SpiDevice> Sensor<Icm20948<SpiDevice<SPI>, MagDisabled>> {
+    pub async fn init_icm20948(spi: SPI) -> Result<Self, SetupError<SPI::Error>> {
+        let mut driver = IcmBuilder::new_spi(spi, embassy_time::Delay)
+            .acc_range(AccRange::Gs4)
+            .acc_dlp(AccDlp::Hz111)
+            .acc_odr(0)
+            .acc_unit(AccUnit::Gs)
+            .gyr_range(GyrRange::Dps1000)
+            .gyr_dlp(GyrDlp::Hz196)
+            .gyr_odr(0)
+            .gyr_unit(GyrUnit::Rps)
+            .initialize_6dof()
+            .await?;
 
-    pub async fn reset_fifo(&mut self) -> Result<(), icm20948::Error<I::Error>> {
-        self.driver.reset_fifo().await
+        // raw data-ready interrupt on the INT pin, so the flight loop can stay
+        // interrupt-driven instead of a fixed timer
+        driver.enable_data_ready_interrupt().await?;
+        // SPI-only: stop the shared SDA/SCL-vs-SDI/SCLK pins from being mistaken for I2C traffic
+        driver.disable_i2c_interface().await?;
+
+        defmt::info!("ICM20948 init OK");
+        Ok(Self { driver })
     }
 }
 
-impl<I: I2c> ImuRead for Sensor<Icm20948Driver<I2cInterface<I>>> {
-    type Error = icm20948::Error<I::Error>;
+// read_6dof does a single combined burst read spanning accel+gyro+temp (contiguous registers) -
+// works the same regardless of transport or whether mag is enabled, so this impl is generic
+// over both
+impl<T: Transport, MAG> ImuRead for Sensor<Icm20948<T, MAG>> {
+    type Error = T::Error;
 
     async fn read(&mut self) -> Result<(Vector3<f32>, Vector3<f32>), Self::Error> {
-        let acc = self.driver.read_accelerometer().await?;
-        let gyro = self.driver.read_gyroscope_radians().await?;
-        Ok((
-            Vector3::new(acc.x, acc.y, acc.z),
-            Vector3::new(gyro.x, gyro.y, gyro.z),
-        ))
+        let data = self.driver.read_6dof().await?;
+        Ok((Vector3::from(data.acc), Vector3::from(data.gyr)))
     }
 }
 
 #[cfg(feature = "calibrate")]
-impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
+impl<T: Transport, MAG> Sensor<Icm20948<T, MAG>>
+where
+    T::Error: Debug,
+{
     /// 6-orientation tumble calibration - flix's calibrateAccel/calibrateAccelOnce pattern.
     /// Place the frame in each of the 6 orientations in turn; each one's averaged reading
     /// updates a running per-axis min/max across all orientations seen so far. Whichever
@@ -230,16 +153,7 @@ impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
             .expect("calibration publisher already taken");
 
         // most sensitive range, for the best resolution on small deviations from 1g
-        if let Err(e) = self
-            .driver
-            .configure_accelerometer(AccelConfig {
-                full_scale: AccelFullScale::G2,
-                dlpf: AccelDlpf::Hz111,
-                dlpf_enable: true,
-                sample_rate_div: 1,
-            })
-            .await
-        {
+        if let Err(e) = self.driver.set_acc_range(AccRange::Gs2).await {
             defmt::error!(
                 "failed to switch to +/-2g range for calibration: {}",
                 defmt::Debug2Format(&e)
@@ -258,9 +172,9 @@ impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
             let mut sum = Vector3::zeros();
             let mut successful: u32 = 0;
             for _ in 0..SAMPLES {
-                match self.driver.read_accelerometer().await {
+                match self.driver.read_acc().await {
                     Ok(a) => {
-                        sum += Vector3::new(a.x, a.y, a.z);
+                        sum += Vector3::from(a);
                         successful += 1;
                     }
                     Err(e) => defmt::error!(
@@ -315,7 +229,13 @@ impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
             scale: (acc_max - acc_min) / 2.0,
         })
     }
+}
 
+#[cfg(all(feature = "calibrate", feature = "mag"))]
+impl<T: Transport> Sensor<Icm20948<T, MagEnabled>>
+where
+    T::Error: Debug,
+{
     /// magnetometer hard-iron/soft-iron calibration - no fixed poses, just rotate through as
     /// many orientations as possible while it collects samples. see libs::mag_calibration for
     /// the actual fitting algorithm; this just feeds it live samples and reports progress.
@@ -324,7 +244,6 @@ impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
     ///
     /// called right after run_calibration in the same session - doesn't wait on
     /// wifi::calibrate::START itself, that wait already happened for the accel pass
-    #[cfg(feature = "mag")]
     pub async fn run_mag_calibration(&mut self) -> Option<MagBias> {
         const N: usize = 30; // matches peterkrull/mag-calibrator-rs's own real-hardware usage
         const MIN_MEAN_DISTANCE: f32 = 0.035; // matches peterkrull/mag-calibrator-rs's own usage
@@ -345,9 +264,9 @@ impl<I: I2c> Sensor<Icm20948Driver<I2cInterface<I>>> {
         let mut cal = libs::mag_calibration::MagCalibrator::<N>::new().pre_scaler(200.0);
 
         for _ in 0..MAX_SAMPLES {
-            match self.driver.read_magnetometer().await {
+            match self.driver.read_mag().await {
                 Ok(m) => {
-                    cal.evaluate_sample_vec(Vector3::new(m.x, m.y, m.z));
+                    cal.evaluate_sample_vec(Vector3::from(m));
                     if cal.get_mean_distance() > MIN_MEAN_DISTANCE
                         && let Some((bias, scale)) = cal.perform_calibration()
                     {
@@ -389,17 +308,16 @@ impl Default for MagBias {
     }
 }
 
-impl<I: I2c> ImuReadMag for Sensor<Icm20948Driver<I2cInterface<I>>> {
+#[cfg(feature = "mag")]
+impl<T: Transport> ImuReadMag for Sensor<Icm20948<T, MagEnabled>> {
     async fn read_mag(
         &mut self,
     ) -> Result<(Vector3<f32>, Vector3<f32>, Vector3<f32>), Self::Error> {
-        let acc = self.driver.read_accelerometer().await?;
-        let gyro = self.driver.read_gyroscope_radians().await?;
-        let mag = self.driver.read_magnetometer().await?;
+        let data = self.driver.read_9dof().await?;
         Ok((
-            Vector3::new(acc.x, acc.y, acc.z),
-            Vector3::new(gyro.x, gyro.y, gyro.z),
-            Vector3::new(mag.x, mag.y, mag.z),
+            Vector3::from(data.acc),
+            Vector3::from(data.gyr),
+            Vector3::from(data.mag),
         ))
     }
 }

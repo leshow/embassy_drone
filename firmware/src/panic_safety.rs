@@ -14,11 +14,11 @@ const NUM_CHANNELS: usize = 4;
 
 // register sequence transcribed from esp-hal 1.1.1's Channel::set_duty_hw /
 // start_duty_without_fading / update_channel (src/ledc/channel.rs, the `#[cfg(not(any(esp32,
-// esp32c6, esp32h2)))]` branch, which covers c3)
+// esp32c6, esp32h2)))]` branch - confirmed against esp-hal source that s3 falls into this
+// branch, not the c6/h2 gamma-register scheme)
 //
 // the same three steps Motors::turn_off(), but since we dont have ownership of motor
 // in panic handler we do it through static accessor
-#[cfg(feature = "c3")]
 fn kill_motors() {
     let ledc = LEDC::regs();
     for ch in 0..NUM_CHANNELS {
@@ -30,24 +30,6 @@ fn kill_motors() {
                 w.duty_num().bits(0x1);
                 w.duty_cycle().bits(0x1);
                 w.duty_scale().bits(0x0)
-            }
-        });
-        ledc.ch(ch).conf0().modify(|_, w| w.para_up().set_bit());
-    }
-}
-
-#[cfg(feature = "c6")]
-fn kill_motors() {
-    let ledc = LEDC::regs();
-    for ch in 0..NUM_CHANNELS {
-        ledc.ch(ch).duty().write(|w| unsafe { w.duty().bits(0) });
-        ledc.ch(ch).conf1().write(|w| w.duty_start().set_bit());
-        ledc.ch_gamma_wr(ch).write(|w| {
-            w.ch_gamma_duty_inc().set_bit();
-            unsafe {
-                w.ch_gamma_duty_num().bits(0x1);
-                w.ch_gamma_duty_cycle().bits(0x1);
-                w.ch_gamma_scale().bits(0x0)
             }
         });
         ledc.ch(ch).conf0().modify(|_, w| w.para_up().set_bit());

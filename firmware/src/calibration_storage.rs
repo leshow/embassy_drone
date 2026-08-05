@@ -86,7 +86,7 @@ impl MagBias {
         buf
     }
 
-    fn from_bytes(buf: &[u8; MAG_RECORD_LEN]) -> Option<MagBias> {
+    pub fn from_bytes(buf: &[u8; MAG_RECORD_LEN]) -> Option<MagBias> {
         if buf[0..4] != MAG_MAGIC {
             return None;
         }

@@ -1,0 +1,25 @@
+[package]
+name = "icm20948-async"
+version = "0.6.0"
+edition = "2021"
+description = "Async driver for the ICM20948 (Imu+Mag) for no_std environments"
+authors = ["Peter Krull"]
+license = "MIT"
+repository = "https://github.com/peterkrull/icm20948-async"
+readme = "README.md"
+keywords = ["embedded", "embedded-hal", "async", "no_std", "icm20948"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+align-mag = []
+serde = ["dep:serde"]
+
+[dependencies]
+embedded-hal-async = "1.0.0"
+
+[dependencies.serde]
+version = "1.0"
+optional = true
+default-features = false
+features = ["derive"]

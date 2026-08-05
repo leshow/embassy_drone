@@ -2,18 +2,12 @@ use embassy_time::{Duration, Instant};
 use esp_hal::gpio;
 #[cfg(feature = "telemetry")]
 use libs::telemetry::TelemetryPacket;
-#[cfg(feature = "dmp")]
-use nalgebra::Quaternion;
 use nalgebra::{UnitQuaternion, Vector3};
 
 use crate::{Motors, Sensor20948, fusion, wifi};
-#[cfg(feature = "dmp")]
+use crate::{fusion::ImuFusion, sensors::ImuRead};
+#[cfg(feature = "mag")]
 use crate::{fusion::MargFusion, sensors::ImuReadMag};
-#[cfg(not(feature = "dmp"))]
-use crate::{
-    fusion::{ImuFusion, MargFusion},
-    sensors::{ImuRead, ImuReadMag},
-};
 
 // publishes a telemetry snapshot for the wifi udp_task to reply with on the next control packet.
 // called once per loop iteration, from whichever exit point (early continue or full mix) is
@@ -102,14 +96,9 @@ fn trace_telemetry(
     );
 }
 
-// calibrated_gyro is i16 at +/-2000 dps full scale, hardware DLPF at 51 Hz already applied
-#[cfg(feature = "dmp")]
-const GYRO_SCALE: f32 = 2000.0 * fusion::DEG_TO_RAD / 32768.0; // i16 → rad/s
-
 // max roll/pitch command from stick (+/- 25 deg)
 const MAX_TILT_RAD: f32 = 25.0 * fusion::DEG_TO_RAD;
 
-#[cfg(not(feature = "dmp"))]
 pub(crate) mod filters {
     use nalgebra::Vector3;
 
@@ -165,7 +154,6 @@ pub(crate) mod filters {
         cutoff_hz: f32,
     }
 
-    #[cfg(not(feature = "dmp"))]
     impl Lpf3 {
         pub(crate) fn new(cutoff_hz: f32) -> Self {
             Self {
@@ -249,6 +237,7 @@ const ANGLE_P_YAW: f32 = 0.0; // flix 3.0
 // and its tests. weight is a fixed fraction applied per TICK, not per second (same
 // property flix's own filter turned out to have), so the real half-life depends on however fast
 // the loop actually runs.
+#[allow(dead_code)] // apply_level_prior call is temporarily commented out for a timing test
 const LEVEL_PRIOR_WEIGHT: f32 = 0.0002;
 
 // inner loop
@@ -285,10 +274,6 @@ fn deadband(x: f32, band: f32) -> f32 {
     }
 }
 
-// max angle any single DMP sample can plausibly rotate by since the last accepted sample
-#[cfg(feature = "dmp")]
-const MAX_QUAT_JUMP_RAD: f32 = 60.0 * fusion::DEG_TO_RAD;
-
 /// PID
 ///
 /// Proportional-Integral-Derivative controller — computes a corrective output
@@ -316,9 +301,7 @@ struct Pid {
     /// RATE_INTEGRAL_LEAK. A persistent error settles at error/leak instead of climbing to
     /// integral_limit regardless of how small it is
     leak: f32,
-    /// low-pass filter state for the derivative term - see RATE_LPF_HZ. Only used on the
-    /// non-DMP path; the DMP path's hardware DLPF at 51 Hz already covers this
-    #[cfg_attr(feature = "dmp", allow(dead_code))]
+    /// low-pass filter state for the derivative term - see RATE_LPF_HZ
     d_filter: f32,
 }
 
@@ -351,12 +334,9 @@ impl Pid {
         };
         self.prev_error = error;
 
-        // DMP path: hardware DLPF at 51 Hz already covers this signal, no need to filter again.
-        // Non-DMP path: hardware DLPF is 197 Hz (much wider), so real prop/motor vibration was
-        // passing straight through into the derivative term unfiltered - see RATE_LPF_HZ
-        #[cfg(feature = "dmp")]
-        let derivative = raw_derivative;
-        #[cfg(not(feature = "dmp"))]
+        // hardware DLPF is 196 Hz (much wider than this filter's 40 Hz target), so real
+        // prop/motor vibration was passing straight through into the derivative term
+        // unfiltered - see RATE_LPF_HZ
         let derivative = {
             self.d_filter +=
                 filters::lpf_alpha(filters::RATE_LPF_HZ, dt) * (raw_derivative - self.d_filter);
@@ -373,7 +353,6 @@ impl Pid {
     }
 }
 
-#[cfg(not(feature = "dmp"))]
 mod gyro_bias {
     use super::*;
     // gyro bias re-zeroing gain and debounce, matching flix's gyroBiasFilter/landedDelay
@@ -534,109 +513,9 @@ fn wrap_angle(a: f32) -> f32 {
 //     (a + PI).rem_euclid(2.0 * PI) - PI
 // }
 
-// reads one DMP FIFO frame, returns (quaternion, gyro_rad_s) or None if no usable data
-// DMP software fusion. calibrated_gyro replaces raw gyro register reads
-#[cfg(feature = "dmp")]
-async fn read_dmp(
-    sensor: &mut Sensor20948<'_>,
-    log_counter: &mut u32,
-    last_quat: &mut Option<icm20948::dmp::Quaternion>,
-) -> Option<(UnitQuaternion<f32>, Vector3<f32>)> {
-    match sensor.read_dmp().await {
-        Ok(Some(data)) => {
-            let quat = data.quaternion_6axis.or(data.quaternion_9axis)?;
-
-            // reject corrupted DMP packets - a valid unit quaternion always has norm ~= 1,
-            // but a byte-misaligned read (e.g. a flipped header bit) produces components
-            // wildly outside that bound rather than a subtle numerical error, so a generous
-            // tolerance still catches it without rejecting legitimate quantization noise
-            let norm_sq = quat.w * quat.w + quat.x * quat.x + quat.y * quat.y + quat.z * quat.z;
-            if !(0.9..=1.1).contains(&norm_sq) {
-                defmt::warn!(
-                    "DMP quaternion failed norm check: w: {} x: {} y: {} z: {} norm_sq: {}",
-                    quat.w,
-                    quat.x,
-                    quat.y,
-                    quat.z,
-                    norm_sq
-                );
-                return None;
-            }
-
-            // TODO: maybe remove
-            // was getting some corrupted packets out of the FIFO queue
-            // reject packets that still pass the norm check above but imply an impossible
-            // jump from the last accepted orientation - the 6-axis packet only carries x/y/z
-            // on the wire and derives w to force unit norm, so corrupted x/y/z bytes that
-            // happen to sum to <= 1 slip past the norm check as a "valid" but wrong orientation
-            if let Some(prev) = *last_quat {
-                let dot = (prev.w * quat.w + prev.x * quat.x + prev.y * quat.y + prev.z * quat.z)
-                    .clamp(-1.0, 1.0);
-                let jump = 2.0 * libm::acosf(dot.abs());
-                if jump > MAX_QUAT_JUMP_RAD {
-                    defmt::warn!(
-                        "DMP quaternion failed continuity check: {}° jump from last sample",
-                        jump * fusion::RAD_TO_DEG
-                    );
-                    return None;
-                }
-            }
-
-            let (gx, gy, gz) = data.calibrated_gyro?;
-            let gyro = Vector3::new(
-                gx as f32 * GYRO_SCALE,
-                gy as f32 * GYRO_SCALE,
-                gz as f32 * GYRO_SCALE,
-            );
-            // validated above (norm + continuity) so this is trusted, legitimate data - but
-            // norm_sq is only checked to within 0.9..=1.1, not exactly 1.0, and transform_vector
-            // on a non-unit quaternion produces a distorted (not just imprecise) result, so
-            // normalize here rather than new_unchecked
-            let uq = UnitQuaternion::new_normalize(Quaternion::new(quat.w, quat.x, quat.y, quat.z));
-            *log_counter += 1;
-            if *log_counter >= crate::LOG_EVERY_N {
-                *log_counter = 0;
-                let (roll, pitch, yaw) = uq.euler_angles();
-                defmt::debug!(
-                    "DMP w: {} x: {} y: {} z: {} | roll: {}° pitch: {}° yaw: {}°",
-                    uq.w,
-                    uq.i,
-                    uq.j,
-                    uq.k,
-                    roll * fusion::RAD_TO_DEG,
-                    pitch * fusion::RAD_TO_DEG,
-                    yaw * fusion::RAD_TO_DEG,
-                );
-            }
-            *last_quat = Some(quat);
-            Some((uq, gyro))
-        }
-        Err(icm20948::Error::FifoOverflow) => {
-            defmt::warn!("DMP FIFO overflow");
-            // flag whatever telemetry is already cached so ground control sees this happened,
-            // even though we have no fresh sample to publish this tick
-            #[cfg(feature = "telemetry")]
-            wifi::TELEMETRY.lock(|c| {
-                let mut cached = c.get();
-                if let Some((pkt, _)) = cached.as_mut() {
-                    pkt.set_fifo_overflow(true);
-                }
-                c.set(cached);
-            });
-            None
-        }
-        Err(e) => {
-            defmt::error!("DMP read error: {}", defmt::Debug2Format(&e));
-            None
-        }
-        Ok(None) => None,
-    }
-}
-
 // running min/max/avg of loop dt between periodic log lines - see read_fusion's debug log.
 // lets actual loop rate be checked without telemetry or trace logging (both DEFMT_LOG=info
 // and DEFMT_LOG=debug print this; only trace_telemetry needs DEFMT_LOG=trace)
-#[cfg(not(feature = "dmp"))]
 struct DtStats {
     min: f32,
     max: f32,
@@ -644,7 +523,6 @@ struct DtStats {
     n: u32,
 }
 
-#[cfg(not(feature = "dmp"))]
 impl DtStats {
     const fn new() -> Self {
         Self {
@@ -668,9 +546,7 @@ impl DtStats {
 }
 
 // reads raw accel/gyro and fuses them into an orientation quaternion via whichever filter
-// implements ImuFusion. same (Quaternion, gyro_rad_s) shape as read_dmp, so the rest of the
-// control loop is unchanged regardless of which sensor-read path or filter is active
-#[cfg(not(feature = "dmp"))]
+// implements ImuFusion
 #[allow(clippy::too_many_arguments)]
 async fn read_fusion<F: ImuFusion>(
     sensor: &mut Sensor20948<'_>,
@@ -683,13 +559,15 @@ async fn read_fusion<F: ImuFusion>(
     dt: f32,
     log_counter: &mut u32,
     dt_stats: &mut DtStats,
-    i2c_stats: &mut DtStats,
+    spi_stats: &mut DtStats,
+    math_stats: &mut DtStats,
 ) -> Option<(UnitQuaternion<f32>, Vector3<f32>, Vector3<f32>)> {
     let read_start = Instant::now();
     let read_result = sensor.read().await;
-    i2c_stats.record(read_start.elapsed().as_micros() as f32 / 1_000_000.0);
+    spi_stats.record(read_start.elapsed().as_micros() as f32 / 1_000_000.0);
     match read_result {
         Ok((accel, gyro)) => {
+            let math_start = Instant::now();
             let accel = accel_bias.apply(accel);
 
             // THIS IS SPECIFIC TO MY CRAFT, it's mounted not perfectly so I'm compensating
@@ -741,10 +619,11 @@ async fn read_fusion<F: ImuFusion>(
             };
 
             let quat = filter.update_imu(dt, accel_for_fusion, gyro);
-            // background drift bound - see LEVEL_PRIOR_WEIGHT. runs unconditionally, not just
-            // when the accel gate above rejected this sample, since it's cheap and never fights
-            // a real correction (weight is ~15x weaker than accel's own influence on the filter)
-            let quat = libs::level_correction::apply_level_prior(quat, LEVEL_PRIOR_WEIGHT);
+            // TEMPORARILY DISABLED - timing experiment to check whether this (four
+            // transcendental calls: acos/atan2 x2, sin, cos) is what's driving math_stats.
+            // restore once confirmed either way - see LEVEL_PRIOR_WEIGHT for what this does
+            // let quat = libs::level_correction::apply_level_prior(quat, LEVEL_PRIOR_WEIGHT);
+            math_stats.record(math_start.elapsed().as_micros() as f32 / 1_000_000.0);
 
             *log_counter += 1;
             dt_stats.record(dt);
@@ -752,7 +631,7 @@ async fn read_fusion<F: ImuFusion>(
                 *log_counter = 0;
                 let (roll, pitch, yaw) = quat.euler_angles();
                 defmt::debug!(
-                    "fusion w: {} x: {} y: {} z: {} | roll: {}° pitch: {}° yaw: {}° | dt min: {} max: {} avg: {} n: {} | i2c read min: {} max: {} avg: {}",
+                    "fusion w: {} x: {} y: {} z: {} | roll: {}° pitch: {}° yaw: {}° | dt min: {} max: {} avg: {} n: {} | spi read min: {} max: {} avg: {} | math min: {} max: {} avg: {}",
                     quat.w,
                     quat.i,
                     quat.j,
@@ -764,12 +643,16 @@ async fn read_fusion<F: ImuFusion>(
                     dt_stats.max,
                     dt_stats.avg(),
                     dt_stats.n,
-                    i2c_stats.min,
-                    i2c_stats.max,
-                    i2c_stats.avg(),
+                    spi_stats.min,
+                    spi_stats.max,
+                    spi_stats.avg(),
+                    math_stats.min,
+                    math_stats.max,
+                    math_stats.avg(),
                 );
                 *dt_stats = DtStats::new();
-                *i2c_stats = DtStats::new();
+                *spi_stats = DtStats::new();
+                *math_stats = DtStats::new();
             }
             Some((quat, gyro, accel))
         }
@@ -782,6 +665,7 @@ async fn read_fusion<F: ImuFusion>(
 
 // adds the magnetometer so yaw has an absolute reference
 // instead of pure gyro integration. visualizer-only for now, not wired into run_control
+#[cfg(feature = "mag")] // read_mag only exists on the MagEnabled driver
 #[allow(dead_code)] // only called from run_fusion_visualizer, which needs the visualize feature
 async fn read_fusion_marg<F: MargFusion>(
     sensor: &mut Sensor20948<'_>,
@@ -834,28 +718,35 @@ pub async fn run_control(
     mut sensor: Sensor20948<'_>,
     mut int_pin: gpio::Input<'static>,
     motors: Motors<'_>,
-    #[cfg_attr(feature = "dmp", allow(unused))] accel_bias: AccelBias,
+    accel_bias: AccelBias,
 ) {
     let mut log_counter: u32 = 0;
-    // placeholder until accel calibration (behind the calibrate feature) can actually fail
-    #[cfg(feature = "dmp")]
-    let mut last_quat: Option<icm20948::dmp::Quaternion> = None;
-    #[cfg(not(feature = "dmp"))]
     let mut fusion_filter = fusion::FusionBuilder::new()
         .icm20948()
         .madgwick()
         .beta(BETA_FILTER)
         .build();
-    #[cfg(not(feature = "dmp"))]
     let mut gyro_bias = gyro_bias::seed_gyro_bias(&mut sensor, &mut int_pin).await;
-    #[cfg(not(feature = "dmp"))]
     let mut rate_filter = filters::Lpf3::new(filters::RATE_LPF_HZ);
-    #[cfg(not(feature = "dmp"))]
     let mut accel_filter = filters::Lpf3::new_two_pole(filters::ACCEL_LPF_HZ);
-    #[cfg(not(feature = "dmp"))]
     let mut dt_stats = DtStats::new();
-    #[cfg(not(feature = "dmp"))]
-    let mut i2c_stats = DtStats::new();
+    let mut spi_stats = DtStats::new();
+    // time from read_fusion's SPI read returning through the end of the Madgwick/filter math
+    let mut math_stats = DtStats::new();
+    // time actually spent inside int_pin.wait_for_high().await - from calling it to it
+    // resolving, i.e. how long the task was genuinely suspended waiting for the data-ready
+    // interrupt to fire
+    let mut interrupt_wait_stats = DtStats::new();
+    // time from the data-ready interrupt firing to the CONTROLS check finishing - isolates
+    // interrupt/scheduler wake latency from actual work
+    let mut wake_stats = DtStats::new();
+    // time from read_fusion returning through euler_angles()+bias_snapshot - runs every tick
+    // regardless of arm state, unlike pid_mix_stats below
+    let mut euler_stats = DtStats::new();
+    // time from the failsafe/packet check resolving through motors.set_motors() - the
+    // outer/inner PID updates, motor mixing, and the PWM/LEDC hardware write. only recorded
+    // once armed with a fresh packet and throttle above the idle cutoff
+    let mut pid_mix_stats = DtStats::new();
 
     // inner rate PIDs
     let mut roll_pid = Pid::new(
@@ -886,11 +777,33 @@ pub async fn run_control(
     let mut last_instant: Option<Instant> = None;
 
     loop {
+        let interrupt_wait_start = Instant::now();
         int_pin.wait_for_high().await;
+        interrupt_wait_stats
+            .record(interrupt_wait_start.elapsed().as_micros() as f32 / 1_000_000.0);
+        let wake_start = Instant::now();
 
         let controls = wifi::CONTROLS.lock(|c| c.get());
         let fresh = controls.is_some_and(|(_, at)| at.elapsed() < Duration::from_millis(500));
         let armed = fresh && controls.is_some_and(|(p, _)| p.armed());
+        wake_stats.record(wake_start.elapsed().as_micros() as f32 / 1_000_000.0);
+        // printed here rather than after motors.set_motors() - disarmed ticks take an early
+        // `continue` further down (controls.filter(|_| armed) is always None while disarmed)
+        // and never reach that point, but wake latency is still meaningful to see regardless
+        // of arm state
+        if log_counter == 0 {
+            defmt::debug!(
+                "interrupt wait min: {} max: {} avg: {} | wake min: {} max: {} avg: {}",
+                interrupt_wait_stats.min,
+                interrupt_wait_stats.max,
+                interrupt_wait_stats.avg(),
+                wake_stats.min,
+                wake_stats.max,
+                wake_stats.avg(),
+            );
+            interrupt_wait_stats = DtStats::new();
+            wake_stats = DtStats::new();
+        }
 
         if !last_armed && armed {
             defmt::info!("ARMED");
@@ -908,18 +821,6 @@ pub async fn run_control(
             motors.turn_off();
         }
 
-        #[cfg(feature = "dmp")]
-        let (quat, g, dt, accel) = {
-            let (quat, g) = match read_dmp(&mut sensor, &mut log_counter, &mut last_quat).await {
-                Some(d) => d,
-                None => continue,
-            };
-            let dt = dur_since(&mut last_instant);
-            // DMP fuses on-chip from uncorrected raw readings - no corrected accel to report
-            (quat, g, dt, Vector3::<f32>::zeros())
-        };
-
-        #[cfg(not(feature = "dmp"))]
         let (quat, g, dt, accel) = {
             let dt = dur_since(&mut last_instant);
             let (quat, g, accel) = match read_fusion(
@@ -933,7 +834,8 @@ pub async fn run_control(
                 dt,
                 &mut log_counter,
                 &mut dt_stats,
-                &mut i2c_stats,
+                &mut spi_stats,
+                &mut math_stats,
             )
             .await
             {
@@ -942,13 +844,25 @@ pub async fn run_control(
             };
             (quat, g, dt, accel)
         };
+        let attitude_start = Instant::now();
 
         let euler = quat.euler_angles();
 
-        #[cfg(feature = "dmp")]
-        let bias_snapshot = Vector3::zeros();
-        #[cfg(not(feature = "dmp"))]
         let bias_snapshot = gyro_bias.bias();
+        // recorded (and printed) here rather than folded into pid_mix_stats - this segment
+        // runs on every tick regardless of arm state, but pid_mix_stats' recording point is
+        // past the failsafe/no-packet early `continue` below and so never reached while
+        // disarmed, same issue wake_stats had
+        euler_stats.record(attitude_start.elapsed().as_micros() as f32 / 1_000_000.0);
+        if log_counter == 0 {
+            defmt::debug!(
+                "euler+bias min: {} max: {} avg: {}",
+                euler_stats.min,
+                euler_stats.max,
+                euler_stats.avg(),
+            );
+            euler_stats = DtStats::new();
+        }
 
         // failsafe: zero motors if no packet, packet is stale (>500 ms), or disarmed
         let pkt = match controls.filter(|_| armed) {
@@ -982,6 +896,7 @@ pub async fn run_control(
                 continue;
             }
         };
+        let mix_start = Instant::now();
 
         // would be controlAttitude (flix)
         // DMP gives us the fused quaternion directly instead of running Mahony/Madgwick
@@ -1093,6 +1008,20 @@ pub async fn run_control(
             libs::mixer::mix_motors(pkt_throttle, roll_torque, pitch_torque, yaw_torque);
 
         let (dfl, dfr, drl, drr) = motors.set_motors(fl, fr, rl, rr);
+        pid_mix_stats.record(mix_start.elapsed().as_micros() as f32 / 1_000_000.0);
+        // only reached once armed with a fresh packet and throttle above the idle cutoff - see
+        // the wake_stats print above for why this can't share that print site. log_counter was
+        // just reset by read_fusion above if it hit LOG_EVERY_N - piggyback on that same
+        // cadence rather than tracking a separate counter
+        if log_counter == 0 {
+            defmt::debug!(
+                "pid+mix+motor min: {} max: {} avg: {}",
+                pid_mix_stats.min,
+                pid_mix_stats.max,
+                pid_mix_stats.avg(),
+            );
+            pid_mix_stats = DtStats::new();
+        }
         defmt::trace!(
             "torques roll={} pitch={} yaw={} | mix fl={} fr={} rl={} rr={} | duty fl={} fr={} rl={} rr={} | dt={}",
             roll_torque,
@@ -1143,18 +1072,7 @@ pub async fn run_control(
 }
 
 // visualize-only loop: log orientation, no motor control, no WiFi
-#[cfg(all(feature = "visualize", feature = "dmp"))]
-pub async fn run_dmp_visualizer(mut sensor: Sensor20948<'_>, mut int_pin: gpio::Input<'static>) {
-    let mut log_counter: u32 = 0;
-    let mut last_quat: Option<icm20948::dmp::Quaternion> = None;
-    loop {
-        int_pin.wait_for_high().await;
-        read_dmp(&mut sensor, &mut log_counter, &mut last_quat).await;
-    }
-}
-
-// visualize-only loop for the fusion path: log orientation, no motor control, no WiFi
-#[cfg(all(feature = "visualize", not(feature = "dmp")))]
+#[cfg(feature = "visualize")]
 pub async fn run_fusion_visualizer(
     mut sensor: Sensor20948<'_>,
     mut int_pin: gpio::Input<'static>,
@@ -1163,6 +1081,7 @@ pub async fn run_fusion_visualizer(
     let mut log_counter: u32 = 0;
     let mut fusion_filter = fusion::FusionBuilder::new()
         .icm20948()
+        // .mahony()
         .madgwick()
         .beta(BETA_FILTER)
         .build();
@@ -1170,7 +1089,8 @@ pub async fn run_fusion_visualizer(
     let mut rate_filter = filters::Lpf3::new(filters::RATE_LPF_HZ);
     let mut accel_filter = filters::Lpf3::new_two_pole(filters::ACCEL_LPF_HZ);
     let mut dt_stats = DtStats::new();
-    let mut i2c_stats = DtStats::new();
+    let mut spi_stats = DtStats::new();
+    let mut math_stats = DtStats::new();
     let mut last_instant: Option<Instant> = None;
     loop {
         int_pin.wait_for_high().await;
@@ -1187,7 +1107,8 @@ pub async fn run_fusion_visualizer(
             dt,
             &mut log_counter,
             &mut dt_stats,
-            &mut i2c_stats,
+            &mut spi_stats,
+            &mut math_stats,
         )
         .await;
         // read_fusion_marg(&mut sensor, &mut fusion_filter, dt, &mut log_counter).await;

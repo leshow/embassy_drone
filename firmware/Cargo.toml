@@ -11,7 +11,12 @@ esp-rtos = { version = "0.3", features = ["embassy", "esp-radio"] }
 esp-bootloader-esp-idf = { version = "0.5" }
 esp-storage = { version = "0.9" }
 embedded-storage = "0.3"
-esp-backtrace = { version = "0.19", features = ["panic-handler", "defmt", "custom-pre-backtrace", "custom-halt"] }
+esp-backtrace = { version = "0.19", features = [
+	"panic-handler",
+	"defmt",
+	"custom-pre-backtrace",
+	"custom-halt",
+] }
 esp-println = { version = "0.17", default-features = false, features = [
 	"jtag-serial",
 	"defmt-espflash",
@@ -20,6 +25,7 @@ embedded-hal-async = "1.0"
 defmt = "1"
 esp-radio = { version = "0.18.0", features = ["wifi"] }
 esp-alloc = { version = "0.10.0" }
+embedded-hal-bus = { version = "0.3", features = ["async"] }
 embassy-net = { version = "0.9", features = [
 	"udp",
 	"medium-ethernet",
@@ -28,7 +34,7 @@ embassy-net = { version = "0.9", features = [
 embassy-sync = "0.8"
 static_cell = "2"
 # external non-embassy/hal libs
-icm20948-rs = { version = "0.2.3", features = ["async", "dmp", "defmt"] }
+icm20948-async = { path = "../vendor/icm20948-async" }
 mpu9250-async = { version = "0.1" }
 uf-ahrs = "0.2.1"
 libm = "0.2.16"
@@ -38,32 +44,22 @@ nalgebra = { version = "0.35", default-features = false, features = [
 libs = { path = "../libs", default-features = false }
 
 [features]
-default = ["c3"]
+default = ["s3"]
 calibrate = [
 ] # you will also have to manually edit the .cargo/config.toml to remove --monitor
 test_motors = []
-dmp = []
 visualize = []
 # magnetometer support - init'd on hardware, and (with calibrate) runs mag calibration.
 # on its own (without calibrate) does nothing yet - live-flight mag fusion isn't wired up
 mag = []
 telemetry = ["libs/telemetry"]
 telemetry-verbose = ["telemetry", "libs/telemetry-verbose"]
-c3 = [
-	"esp-hal/esp32c3",
-	"esp-rtos/esp32c3",
-	"esp-bootloader-esp-idf/esp32c3",
-	"esp-backtrace/esp32c3",
-	"esp-println/esp32c3",
-	"esp-radio/esp32c3",
-	"esp-storage/esp32c3",
-]
-c6 = [
-	"esp-hal/esp32c6",
-	"esp-rtos/esp32c6",
-	"esp-bootloader-esp-idf/esp32c6",
-	"esp-backtrace/esp32c6",
-	"esp-println/esp32c6",
-	"esp-radio/esp32c6",
-	"esp-storage/esp32c6",
+s3 = [
+	"esp-hal/esp32s3",
+	"esp-rtos/esp32s3",
+	"esp-bootloader-esp-idf/esp32s3",
+	"esp-backtrace/esp32s3",
+	"esp-println/esp32s3",
+	"esp-radio/esp32s3",
+	"esp-storage/esp32s3",
 ]
