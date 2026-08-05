@@ -98,7 +98,7 @@ DEFMT_LOG="info" LOG_RATE_MS=1 cargo flash-s3 --features visualize | (cd visuali
 
 It feeds the esp32 log output to a binary reading stdin and rendering a cube on screen
 
-Sensor readings from the ICM-20948 (over SPI) are sent to the ESP32-S3, where a Madgwick filter fuses accel and gyro data in software to correct orientation. (Earlier versions could also offload fusion to the ICM-20948's onboard DMP; that path has been dropped in favor of `peterkrull/icm20948-async`, which doesn't support the DMP.)
+Sensor readings from the ICM-20948 (over SPI) are sent to the ESP32-S3, where a Madgwick filter fuses accel and gyro data in software to correct orientation. (Earlier versions could also offload fusion to the ICM-20948's onboard DMP; that path has been dropped because DMP, although able to fuse mag input without calibration, is only capable of 100hz.) The icm20948's max speed is 1125hz.
 
 ```sh
 DEFMT_LOG="info" LOG_RATE_MS=1 cargo flash-s3 --features visualize | (cd visualizer && cargo run)
