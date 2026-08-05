@@ -16,7 +16,7 @@ I've also created a prop guard you can mount as a single piece or in two halves,
 
 They have a C-snap fit to the motor holders that should lock them into place pretty well. I've printed with a 0.4 and 0.6 nozzle on a bambu a1 and both results are usable. Obviously if you want cleaner layer lines go for the smaller nozzle.
 
-I've printed in PLA, PETG and PETG-CF & GF. PLA seems totally fine, the drone frame is around 16 grams. The props are heavy at an additional 16 grams. They might require a bit of re-design but for indoor testing not so bad.
+I've printed in PLA, PETG and PETG-CF & GF. PLA seems totally fine, the drone frame is around ~13 grams. The prop guards are heavy at an additional 14 grams (I have a slimmed down version that still give some protection in the 3mf project file). Recommend running without the prop guards to get better battery and flight time.
 
 ## Parts list
 
