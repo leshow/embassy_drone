@@ -38,45 +38,54 @@ jobs:
       - run: cargo test -p libs ${{ matrix.args }}
 
   check-firmware:
-    name: Check firmware (${{ matrix.chip }})
+    name: Check firmware (${{ matrix.name }})
     runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       matrix:
         include:
-          - chip: esp32c3
-            target: riscv32imc-unknown-none-elf
-            features: c3,dmp
-          - chip: esp32c6
-            target: riscv32imac-unknown-none-elf
-            features: c6,dmp
+          - name: default
+            features: s3
+          - name: telemetry
+            features: s3,telemetry
+          - name: calibrate
+            features: s3,calibrate
+          - name: mag+calibrate
+            features: s3,mag,calibrate
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: esp-rs/xtensa-toolchain@v1.7.0
         with:
-          targets: ${{ matrix.target }}
+          default: true
+          buildtargets: esp32s3
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p embassy_quad --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+      - run: cargo check -p embassy_quad --target xtensa-esp32s3-none-elf -Z build-std=core,alloc --no-default-features --features ${{ matrix.features }}
 
   clippy-firmware:
-    name: Clippy firmware (${{ matrix.chip }})
+    name: Clippy firmware (${{ matrix.name }})
     runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       matrix:
         include:
-          - chip: esp32c3
-            target: riscv32imc-unknown-none-elf
-            features: c3,dmp
-          - chip: esp32c6
-            target: riscv32imac-unknown-none-elf
-            features: c6,dmp
+          - name: default
+            features: s3
+          - name: telemetry
+            features: s3,telemetry
+          - name: calibrate
+            features: s3,calibrate
+          - name: mag+calibrate
+            features: s3,mag,calibrate
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: esp-rs/xtensa-toolchain@v1.7.0
         with:
-          targets: ${{ matrix.target }}
-          components: clippy
+          default: true
+          buildtargets: esp32s3
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -p embassy_quad --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }} -- -D warnings
+      - run: cargo clippy -p embassy_quad --target xtensa-esp32s3-none-elf -Z build-std=core,alloc --no-default-features --features ${{ matrix.features }} -- -D warnings
 
   check-ground-control:
     name: Check ground_control

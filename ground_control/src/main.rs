@@ -7,9 +7,9 @@ use std::{
 
 use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs};
 #[cfg(feature = "telemetry")]
-use libs::telemetry::{TelemetryPacket, TELEMETRY_SIZE};
+use libs::telemetry::{TELEMETRY_SIZE, TelemetryPacket};
 use libs::{
-    calibrate::{CalibrationMode, CALIBRATION_SIZE},
+    calibrate::{CALIBRATION_SIZE, CalibrationMode},
     control::ControlPacket,
 };
 use tracing::{error, info, warn};
