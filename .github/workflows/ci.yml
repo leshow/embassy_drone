@@ -9,6 +9,10 @@ jobs:
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
+    # ground_control/visualizer/libs are plain x86 stable builds - only firmware needs the
+    # esp toolchain pinned by rust-toolchain.toml, so override it back to stable here
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -22,6 +26,8 @@ jobs:
   test-libs:
     name: Test libs (${{ matrix.name }})
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
     strategy:
       matrix:
         include:
@@ -90,6 +96,8 @@ jobs:
   check-ground-control:
     name: Check ground_control
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -103,6 +111,8 @@ jobs:
   clippy-ground-control:
     name: Clippy ground_control
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -117,6 +127,8 @@ jobs:
   check-visualizer:
     name: Check visualizer
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -130,6 +142,8 @@ jobs:
   clippy-visualizer:
     name: Clippy visualizer
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
