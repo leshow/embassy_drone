@@ -670,6 +670,7 @@ dependencies = [
  "esp-radio",
  "esp-rtos",
  "esp-storage",
+ "esp-sync",
  "icm20948-async",
  "libm",
  "libs",

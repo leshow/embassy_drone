@@ -8,26 +8,27 @@ use embassy_net::{
     Ipv4Cidr, Runner, Stack, StackResources, StaticConfigV4,
     udp::{PacketMetadata, UdpSocket},
 };
-use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::Instant;
 use esp_hal::{peripherals::WIFI, rng::Rng};
 use esp_radio::wifi::{
     AccessPointStationEventInfo, AuthenticationMethod, Config, ControllerConfig, Interface,
     WifiController, ap::AccessPointConfig,
 };
+use static_cell::StaticCell;
+
 use libs::control::{self, ControlPacket};
 #[cfg(feature = "telemetry")]
 use libs::telemetry::TelemetryPacket;
-use static_cell::StaticCell;
 
 // latest control input from ground control, stamped at receive time for failsafe
-pub static CONTROLS: Mutex<CriticalSectionRawMutex, Cell<Option<(ControlPacket, Instant)>>> =
+pub static CONTROLS: Mutex<esp_sync::RawMutex, Cell<Option<(ControlPacket, Instant)>>> =
     Mutex::new(Cell::new(None));
 
 // latest telemetry snapshot from the flight loop, sent back to ground control on each
 // received control packet. None until the flight loop has produced a first sample.
 #[cfg(feature = "telemetry")]
-pub static TELEMETRY: Mutex<CriticalSectionRawMutex, Cell<Option<(TelemetryPacket, Instant)>>> =
+pub static TELEMETRY: Mutex<esp_sync::RawMutex, Cell<Option<(TelemetryPacket, Instant)>>> =
     Mutex::new(Cell::new(None));
 
 macro_rules! mk_static {

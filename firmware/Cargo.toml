@@ -25,6 +25,7 @@ embedded-hal-async = "1.0"
 defmt = "1"
 esp-radio = { version = "0.18.0", features = ["wifi"] }
 esp-alloc = { version = "0.10.0" }
+esp-sync = { version = "0.2.1" }
 embedded-hal-bus = { version = "0.3", features = ["async"] }
 embassy-net = { version = "0.9", features = [
 	"udp",
@@ -62,4 +63,5 @@ s3 = [
 	"esp-println/esp32s3",
 	"esp-radio/esp32s3",
 	"esp-storage/esp32s3",
+	"esp-sync/esp32s3",
 ]
