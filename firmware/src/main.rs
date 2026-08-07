@@ -165,7 +165,7 @@ async fn main(_spawner: Spawner) {
 
     // S3's actual IO_MUX FSPI pins - not GPIO-matrix routed, so no repeat of the C3 matrix-input
     // -delay ceiling that capped reliable SPI clock there. GPIO10=CS, GPIO11=MOSI, GPIO12=SCLK,
-    // GPIO13=MISO, GPIO6=interrupt, GPIO1-4=motors (rear left/rear right/front left/front right)
+    // GPIO13=MISO, GPIO6=interrupt, GPIO1-4=motors (front left/front right/rear right/rear left)
     let spi = Spi::new(
         peripherals.SPI2,
         esp_hal::spi::master::Config::default().with_frequency(Rate::from_mhz(3)), // 3mhz sems reliable, faster crashed whoami on imu startup
@@ -192,10 +192,10 @@ async fn main(_spawner: Spawner) {
             spi_device,
             peripherals.LEDC,
             peripherals.FLASH,
-            peripherals.GPIO1, // rear left
-            peripherals.GPIO2, // rear right
-            peripherals.GPIO3, // front left
-            peripherals.GPIO4, // front right
+            peripherals.GPIO4, // rear left
+            peripherals.GPIO3, // rear right
+            peripherals.GPIO1, // front left
+            peripherals.GPIO2, // front right
             int_pin,
         )
         .await;

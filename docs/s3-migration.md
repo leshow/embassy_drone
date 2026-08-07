@@ -103,10 +103,10 @@ easy GPIO1-13 header range):
 | MISO               | 13   |
 | CS                 | 10   |
 | Interrupt (INT1)   | 6    |
-| Motor: rear left   | 1    |
-| Motor: rear right  | 2    |
-| Motor: front left  | 3    |
-| Motor: front right | 4    |
+| Motor: front left  | 1    |
+| Motor: front right | 2    |
+| Motor: rear right  | 3    |
+| Motor: rear left   | 4    |
 
 GPIO5, 7, 8, 9 spare on the easy header for anything added later. GPIO9
 (FSPIHD) and GPIO14 (FSPIWP) aren't needed - basic 4-wire SPI doesn't use

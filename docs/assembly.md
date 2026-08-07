@@ -51,10 +51,10 @@ SPI clock speed that GPIO-matrix routing would otherwise impose.
 
 | Motor       | Gate (ESP32) | Gate-Source   | Drain   | Source |
 | ----------- | ------------ | ------------- | ------- | ------ |
-| Front Left  | GPIO3        | 10k pull-down | Motor − | GND    |
-| Front Right | GPIO4        | 10k pull-down | Motor − | GND    |
-| Rear Left   | GPIO1        | 10k pull-down | Motor − | GND    |
-| Rear Right  | GPIO2        | 10k pull-down | Motor − | GND    |
+| Front Left  | GPIO1        | 10k pull-down | Motor − | GND    |
+| Front Right | GPIO2        | 10k pull-down | Motor − | GND    |
+| Rear Left   | GPIO4        | 10k pull-down | Motor − | GND    |
+| Rear Right  | GPIO3        | 10k pull-down | Motor − | GND    |
 
 Motor + on all four motors connects directly to Battery +. Motor − connects to MOSFET Drain.
 
@@ -75,10 +75,10 @@ Motor + on all four motors connects directly to Battery +. Motor − connects to
  GPIO10 ──┤ CS                    ├──► ICM-20948 nCS
   GPIO6 ──┤ INT                   ├──► ICM-20948 INT
           │                       │
-  GPIO3 ──┤ FL PWM                ├──► MOSFET FL Gate
-  GPIO4 ──┤ FR PWM                ├──► MOSFET FR Gate
-  GPIO1 ──┤ RL PWM                ├──► MOSFET RL Gate
-  GPIO2 ──┤ RR PWM                ├──► MOSFET RR Gate
+  GPIO1 ──┤ FL PWM                ├──► MOSFET FL Gate
+  GPIO2 ──┤ FR PWM                ├──► MOSFET FR Gate
+  GPIO4 ──┤ RL PWM                ├──► MOSFET RL Gate
+  GPIO3 ──┤ RR PWM                ├──► MOSFET RR Gate
           └───────────────────────┘
 ```
 
@@ -88,7 +88,7 @@ Motor + on all four motors connects directly to Battery +. Motor − connects to
                     FRONT
                       ▲
                       │
-      FL (GPIO3)      │       FR (GPIO4)
+      FL (GPIO1)      │       FR (GPIO2)
          ◎────────────┼────────────◎
          │            │            │
          │       ┌────┴────┐       │
@@ -96,7 +96,7 @@ Motor + on all four motors connects directly to Battery +. Motor − connects to
          │       └────┬────┘       │
          │            │            │
          ◎────────────┼────────────◎
-     RL (GPIO1)       │       RR (GPIO2)
+     RL (GPIO4)       │       RR (GPIO3)
                       │
                       ▼
                      BACK
