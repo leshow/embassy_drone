@@ -68,10 +68,10 @@ impl<E> From<Mpu6050Error<E>> for Mpu9250Error<E> {
 
 /// Handles all operations on/with Mpu6050
 pub struct Mpu6050<I2C> {
-    pub(crate) i2c: I2C,
-    pub(crate) slave_addr: u8,
-    pub(crate) acc_sensitivity: f32,
-    pub(crate) gyro_sensitivity: f32,
+    pub i2c: I2C,
+    pub slave_addr: u8,
+    pub acc_sensitivity: f32,
+    pub gyro_sensitivity: f32,
 }
 
 impl<I2C, E> Mpu6050<I2C>
@@ -124,7 +124,7 @@ where
     }
 
     /// Wakes MPU6050 with all sensors enabled (default)
-    pub(crate) async fn wake<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Mpu6050Error<E>> {
+    pub async fn wake<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Mpu6050Error<E>> {
         // MPU6050 has sleep enabled by default -> set bit 0 to wake
         // Set clock source to be PLL with x-axis gyroscope reference, bits 2:0 = 001 (See Register Map )
         self.write_byte(PWR_MGMT_1::ADDR, 0x01).await?;

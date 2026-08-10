@@ -30,13 +30,13 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 mod calibration_storage;
 mod flight;
-mod fusion;
 mod motors;
 mod panic_safety;
 mod sensors;
 mod wifi;
 
-use crate::{flight::AccelBias, motors::Motors, sensors::Sensor};
+use crate::{motors::Motors, sensors::Sensor};
+use libs::flight::AccelBias;
 
 const LOOP_PERIOD_MS: u64 = 1; // 1000Hz target loop rate; shared by timer and Madgwick sample_period
 // if changing duty cycle, change this value. currently 10 bit resolution

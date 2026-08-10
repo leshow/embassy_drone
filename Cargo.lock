@@ -1494,7 +1494,9 @@ name = "libs"
 version = "0.1.0"
 dependencies = [
  "icm20948-rs",
+ "libm",
  "nalgebra",
+ "uf-ahrs",
 ]
 
 [[package]]

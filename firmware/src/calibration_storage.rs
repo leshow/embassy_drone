@@ -10,9 +10,9 @@ use esp_bootloader_esp_idf::partitions::{self, DataPartitionSubType, PartitionTy
 use esp_hal::rom::crc;
 use esp_storage::FlashStorage;
 
-use crate::flight::AccelBias;
 #[cfg(feature = "mag")]
 use crate::sensors::MagBias;
+use libs::flight::AccelBias;
 
 // marks a written record, readable in a raw flash dump, distinguishing it from erased flash
 // (reads back as all 0xFF) or leftover garbage
@@ -32,7 +32,14 @@ const MAG_RECORD_LEN: usize = MAG_MAGIC.len() + MAG_PAYLOAD_LEN + 2; // 30b
 #[cfg(feature = "mag")]
 const MAG_OFFSET: u32 = RECORD_LEN as u32; // starts right after accel's record
 
-impl AccelBias {
+pub trait Packet<const LEN: usize> {
+    fn as_bytes(&self) -> [u8; LEN];
+    fn from_bytes(buf: &[u8; LEN]) -> Option<Self>
+    where
+        Self: core::marker::Sized;
+}
+
+impl Packet<RECORD_LEN> for AccelBias {
     fn as_bytes(&self) -> [u8; RECORD_LEN] {
         let mut buf = [0u8; RECORD_LEN];
         buf[0..4].copy_from_slice(&MAGIC);
@@ -71,7 +78,7 @@ impl AccelBias {
 }
 
 #[cfg(feature = "mag")]
-impl MagBias {
+impl Packet<MAG_RECORD_LEN> for MagBias {
     fn as_bytes(&self) -> [u8; MAG_RECORD_LEN] {
         let mut buf = [0u8; MAG_RECORD_LEN];
         buf[0..4].copy_from_slice(&MAG_MAGIC);
@@ -86,7 +93,7 @@ impl MagBias {
         buf
     }
 
-    pub fn from_bytes(buf: &[u8; MAG_RECORD_LEN]) -> Option<MagBias> {
+    fn from_bytes(buf: &[u8; MAG_RECORD_LEN]) -> Option<MagBias> {
         if buf[0..4] != MAG_MAGIC {
             return None;
         }

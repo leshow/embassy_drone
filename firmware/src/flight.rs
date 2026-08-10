@@ -4,10 +4,13 @@ use esp_hal::gpio;
 use libs::telemetry::TelemetryPacket;
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::{Motors, Sensor20948, fusion, wifi};
-use crate::{fusion::ImuFusion, sensors::ImuRead};
+use crate::sensors::ImuRead;
 #[cfg(feature = "mag")]
-use crate::{fusion::MargFusion, sensors::ImuReadMag};
+use crate::sensors::ImuReadMag;
+use crate::{Motors, Sensor20948, wifi};
+#[cfg(feature = "mag")]
+use libs::flight::fusion::MargFusion;
+use libs::flight::{AccelBias, filters, fusion, fusion::ImuFusion, pid::Pid};
 
 // publishes a telemetry snapshot for the wifi udp_task to reply with on the next control packet.
 // called once per loop iteration, from whichever exit point (early continue or full mix) is
@@ -99,131 +102,6 @@ fn trace_telemetry(
 // max roll/pitch command from stick (+/- 25 deg)
 const MAX_TILT_RAD: f32 = 25.0 * fusion::DEG_TO_RAD;
 
-pub(crate) mod filters {
-    use nalgebra::Vector3;
-
-    use crate::fusion;
-
-    // IMU mounting tilt relative to the frame, measured at rest with the frame level (see the
-    // "fusion" debug log's roll/pitch) - per-axis accel bias/scale calibration can't correct a
-    // whole-body mounting rotation, only this can. Pitch isn't corrected: it sits within +/-0.1 deg
-    // of zero at rest across many samples, which is noise, not a real offset. Only applied on the
-    // software-fusion path - the DMP does its own on-chip fusion from uncorrected raw readings.
-    pub(crate) const MOUNT_TILT_ROLL_RAD: f32 = 1.15 * fusion::DEG_TO_RAD;
-
-    // cutoff for the gyro rate filter and the rate PIDs' D-term filter - matches flix's
-    // ratesFilter/RATES_D_LPF_ALPHA, both ~40 Hz. Bench testing (no motors spinning) couldn't
-    // surface the need for this - real prop/motor vibration lands well inside this band and was
-    // feeding straight into the rate loop unfiltered, confirmed by real-flight logs showing motor
-    // output saturating (0 <-> max) once real thrust builds up, despite a clean low-throttle ramp
-    pub(crate) const RATE_LPF_HZ: f32 = 40.0;
-
-    // same idea, applied to accel instead of gyro rate - matches betaflight's acceleration.c
-    // pt2Filter default (accLpfCutHz=25). a single-pole filter at 40 Hz still left real prop
-    // vibration corrupting most samples - see Lpf3::new_two_pole for the steeper two-stage filter
-    // this needs to hit 25 Hz cleanly
-    pub(crate) const ACCEL_LPF_HZ: f32 = 25.0;
-
-    // accel norm outside this band means the reading isn't (close to) pure gravity - real
-    // vibration or motion is mixed in, so its direction can't be trusted as a "down" reference
-    // this tick. matches betaflight's imuIsAccelerometerHealthy() (0.9g-1.1g) - confirmed on our
-    // own hardware tonight: clean readings sit within ~1% of 1g, corrupted ones swing far outside
-    // this band (measured as low as 0.145g, as high as 1.944g during real vibration)
-    pub(crate) const ACCEL_HEALTHY_MIN: f32 = 0.9;
-    pub(crate) const ACCEL_HEALTHY_MAX: f32 = 1.1;
-
-    // discrete low-pass filter gain for a given cutoff and this tick's dt - matches flix's
-    // LowPassFilter::setCutOffFrequency. Recomputed every tick since dt isn't fixed (interrupt
-    // driven loop, not a hard real-time scheduler)
-    pub(crate) fn lpf_alpha(cutoff_hz: f32, dt: f32) -> f32 {
-        1.0 - libm::expf(-2.0 * core::f32::consts::PI * cutoff_hz * dt)
-    }
-
-    // per-stage cutoff correction for a two-pole (PT2) cascade - matches betaflight's
-    // CUTOFF_CORRECTION_PT2 (1/sqrt(2^(1/2)-1)). without this, cascading two PT1 stages at the same
-    pub(crate) const CUTOFF_CORRECTION_PT2: f32 = 1.553_774;
-
-    // low-pass filter over a Vector3 signal - shared by the gyro rate filter and the accel filter
-    // below. matches flix's ratesFilter / betaflight's pt1Filter for the single-pole case; accel
-    // needs steeper rolloff so it opts into a second cascaded stage - see new_two_pole
-    pub(crate) struct Lpf3 {
-        state: Vector3<f32>,
-        stage1: Vector3<f32>,
-        two_pole: bool,
-        initialized: bool,
-        cutoff_hz: f32,
-    }
-
-    impl Lpf3 {
-        pub(crate) fn new(cutoff_hz: f32) -> Self {
-            Self {
-                state: Vector3::zeros(),
-                stage1: Vector3::zeros(),
-                two_pole: false,
-                initialized: false,
-                cutoff_hz,
-            }
-        }
-
-        // two cascaded PT1 stages sharing one gain - matches betaflight's pt2Filter, -40dB/decade
-        // instead of -20dB/decade. cutoff_hz gets corrected (CUTOFF_CORRECTION_PT2) before computing
-        // that gain so the cascade's actual -3dB point still lands at cutoff_hz, not higher
-        pub(crate) fn new_two_pole(cutoff_hz: f32) -> Self {
-            Self {
-                two_pole: true,
-                ..Self::new(cutoff_hz)
-            }
-        }
-
-        pub(crate) fn update(&mut self, input: Vector3<f32>, dt: f32) -> Vector3<f32> {
-            if !self.initialized {
-                self.state = input;
-                self.stage1 = input;
-                self.initialized = true;
-                return input;
-            }
-            if self.two_pole {
-                let alpha = lpf_alpha(self.cutoff_hz * CUTOFF_CORRECTION_PT2, dt);
-                self.stage1 += alpha * (input - self.stage1);
-                self.state += alpha * (self.stage1 - self.state);
-            } else {
-                self.state += lpf_alpha(self.cutoff_hz, dt) * (input - self.state);
-            }
-            self.state
-        }
-    }
-}
-
-/// AccelBias
-///
-/// One-time accelerometer bias + scale correction, computed by the 6-orientation tumble
-/// calibration (behind `--features calibrate`) and loaded from flash at boot - see
-/// `calibration_storage`. Unlike gyro bias this isn't re-learned continuously; accel bias
-/// mostly comes from IMU mounting tilt and silicon offset, both fixed for a given build.
-/// Needed in all builds (not just non-DMP): `run_control`'s signature takes one unconditionally,
-/// even though the DMP path leaves it unused (DMP fuses from uncorrected raw readings instead).
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct AccelBias {
-    pub bias: Vector3<f32>,
-    pub scale: Vector3<f32>,
-}
-
-impl Default for AccelBias {
-    fn default() -> Self {
-        Self {
-            bias: Vector3::zeros(),
-            scale: Vector3::new(1.0, 1.0, 1.0),
-        }
-    }
-}
-
-impl AccelBias {
-    // matches flix's apply step exactly: acc = (acc - accBias) / accScale
-    fn apply(&self, accel: Vector3<f32>) -> Vector3<f32> {
-        (accel - self.bias).component_div(&self.scale)
-    }
-}
-
 // outer loop P gains
 const ANGLE_P_ROLL_PITCH: f32 = 4.0; // flix 6.0
 // and angle_p_yaw means the controller will eventually torque
@@ -271,85 +149,6 @@ fn deadband(x: f32, band: f32) -> f32 {
         x + band
     } else {
         0.0
-    }
-}
-
-/// PID
-///
-/// Proportional-Integral-Derivative controller — computes a corrective output
-/// from three components of the error signal:
-///
-/// P proportional: output -> current error (instant response, but can oscillate)
-/// I integral:     output -> accumulated past error (eliminates steady-state offset)
-/// D derivative:   output -> rate of change of error (damps oscillation)
-///
-/// Combined: output = kp·e + ki·∫e·dt + kd·(de/dt)
-struct Pid {
-    /// proportional gain — how hard to push per unit of current error
-    kp: f32,
-    /// integral gain — how hard to push per unit of accumulated error
-    ki: f32,
-    /// derivative gain — how hard to damp per unit of error rate
-    kd: f32,
-    /// running sum of error×dt, clamped to ±integral_limit
-    integral: f32,
-    /// error from last tick for de/dt; NaN until first update to avoid derivative spike on arm
-    prev_error: f32,
-    /// anti-windup clamp — keeps integral from growing unbounded
-    integral_limit: f32,
-    /// per-second decay applied to the integral before adding this tick's error - see
-    /// RATE_INTEGRAL_LEAK. A persistent error settles at error/leak instead of climbing to
-    /// integral_limit regardless of how small it is
-    leak: f32,
-    /// low-pass filter state for the derivative term - see RATE_LPF_HZ
-    d_filter: f32,
-}
-
-impl Pid {
-    const fn new(kp: f32, ki: f32, kd: f32, integral_limit: f32, leak: f32) -> Self {
-        Self {
-            kp,
-            ki,
-            kd,
-            integral: 0.0,
-            prev_error: f32::NAN,
-            integral_limit,
-            leak,
-            d_filter: 0.0,
-        }
-    }
-
-    fn update(&mut self, error: f32, dt: f32) -> f32 {
-        // matches flix: reset if dt is zero or impossibly large
-        if dt <= 0.0 || dt > 0.5 {
-            self.reset();
-            return self.kp * error;
-        }
-        self.integral = (self.integral * (1.0 - self.leak * dt).max(0.0) + error * dt)
-            .clamp(-self.integral_limit, self.integral_limit);
-        let raw_derivative = if self.prev_error.is_nan() {
-            0.0
-        } else {
-            (error - self.prev_error) / dt
-        };
-        self.prev_error = error;
-
-        // hardware DLPF is 196 Hz (much wider than this filter's 40 Hz target), so real
-        // prop/motor vibration was passing straight through into the derivative term
-        // unfiltered - see RATE_LPF_HZ
-        let derivative = {
-            self.d_filter +=
-                filters::lpf_alpha(filters::RATE_LPF_HZ, dt) * (raw_derivative - self.d_filter);
-            self.d_filter
-        };
-
-        self.kp * error + self.ki * self.integral + self.kd * derivative
-    }
-
-    fn reset(&mut self) {
-        self.integral = 0.0;
-        self.d_filter = 0.0;
-        self.prev_error = f32::NAN;
     }
 }
 

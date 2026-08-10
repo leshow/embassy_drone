@@ -24,6 +24,7 @@ pub fn get_port() -> u16 {
 
 pub mod calibrate;
 pub mod control;
+pub mod flight;
 pub mod level_correction;
 pub mod mag_calibration;
 pub mod mixer;

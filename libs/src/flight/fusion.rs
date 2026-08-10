@@ -108,6 +108,12 @@ impl FusionBuilder<NoSensor, NoFilter> {
     }
 }
 
+impl Default for FusionBuilder<NoSensor, NoFilter> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // Sensor selection
 impl<F> FusionBuilder<NoSensor, F> {
     pub fn icm20948(self) -> FusionBuilder<ICM20948, F> {
@@ -619,7 +625,7 @@ impl Fusion<MPU6050, Mahony> {
 // generalizes "fuse one accel+gyro sample into an orientation" across whichever filter
 // FusionBuilder was configured with. Madgwick/Vqf/Mahony/Complementary all expose a matching
 // IMU-only update_imu for the ICM20948, so read_fusion below can stay generic over the filter.
-pub(crate) trait ImuFusion {
+pub trait ImuFusion {
     fn update_imu(&mut self, dt: f32, a: Vector3<f32>, g: Vector3<f32>) -> UnitQuaternion<f32>;
 }
 
@@ -649,7 +655,7 @@ impl ImuFusion for Fusion<ICM20948, Mahony> {
 
 // full MARG update (accel + gyro + mag) - gives yaw an absolute reference instead of pure
 // gyro integration. Madgwick/Vqf/Mahony all expose a matching update for the ICM20948
-pub(crate) trait MargFusion {
+pub trait MargFusion {
     fn update(
         &mut self,
         dt: f32,
@@ -696,6 +702,7 @@ impl MargFusion for Fusion<ICM20948, Mahony> {
 }
 
 pub mod utils {
+    #[allow(clippy::too_many_arguments)]
     /// Core complementary filter step. Alpha is the gyro trust weight (e.g. 0.98).
     pub fn complementary_filter(
         angle_roll: f32,

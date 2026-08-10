@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+libm = "0.2.16"
 nalgebra = { version = "0.35", default-features = false, features = [
 	"libm-force",
 ] }
+uf-ahrs = "0.2.1"
 
 [dev-dependencies]
 # cross-checks icm20948's Quaternion::to_euler_angles against nalgebra's
