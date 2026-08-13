@@ -8,9 +8,9 @@ use crate::sensors::ImuRead;
 #[cfg(feature = "mag")]
 use crate::sensors::ImuReadMag;
 use crate::{Motors, Sensor20948, wifi};
+pub use libs::flight::AccelBias;
 #[cfg(feature = "mag")]
 use libs::flight::fusion::MargFusion;
-pub use libs::flight::AccelBias;
 use libs::flight::{filters, fusion, fusion::ImuFusion, pid::Pid};
 
 // publishes a telemetry snapshot for the wifi udp_task to reply with on the next control packet.
