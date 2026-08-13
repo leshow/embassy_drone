@@ -33,7 +33,7 @@ const SAMPLE_PERIOD_DEFAULT: f32 = 0.001; // 1000 Hz default
 /// S - phantom type for sensor
 ///
 /// (depends on how you mounted sensor)
-/// ```
+/// ```text
 ///         +X (forward)
 ///          ↑
 ///          |
@@ -240,6 +240,8 @@ impl<S> FusionBuilder<S, Vqf> {
 ///
 /// # Example
 /// ```rust
+/// use libs::flight::fusion::FusionBuilder;
+///
 /// let mut fusion = FusionBuilder::new()
 ///     .icm20948()
 ///     .mahony()
