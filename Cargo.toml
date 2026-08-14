@@ -1,8 +1,9 @@
 [workspace]
 members = ["firmware", "libs"]
 # ground_control/visualizer excluded because they're x86 targets; icm20948-async is a vendored
-# path dependency, not a real workspace member
-exclude = ["ground_control", "visualizer", "vendor/icm20948-async"]
+# path dependency, not a real workspace member; brushless_rp2350 needs its own stable/thumbv8m
+# toolchain, incompatible with the esp channel pinned below
+exclude = ["ground_control", "visualizer", "vendor/icm20948-async", "brushless_rp2350"]
 resolver = "2"
 
 [patch.crates-io]

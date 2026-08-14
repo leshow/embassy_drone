@@ -1,0 +1,24 @@
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[target.thumbv8m.main-none-eabihf]
+# default runner: plain USB/BOOTSEL, no probe needed. SWD pins on this board are
+# bare pads (unsoldered) right now. Board must already be in BOOTSEL mode
+# (mass-storage mode) before `cargo run`/`cargo flash-usb`. No defmt/RTT output
+# this way. Using the official picotool (most common RP2350 flashing tool per
+# rp-hal/pico-implrust examples) - reads target family straight from the ELF
+# header over its own PICOBOOT USB interface, no UF2 file involved.
+# -u skips flash sectors that already match, -v verifies the write, -x reboots
+# into the program after flashing.
+runner = "picotool load -u -v -x -t elf"
+# link args (--nmagic, -Tlink.x, -Tdefmt.x) come from build.rs, not here
+rustflags = ["-C", "target-cpu=cortex-m33"]
+
+[alias]
+# same as plain `cargo run --release` - spelled out for symmetry with flash-probe
+flash-usb = "run --release"
+# use pi debug probe: need to connect SWD|SWCLK|SWDIO and it will flash + stream defmt over RTT instead of BOOTSEL/UF2
+flash-probe = "!CARGO_TARGET_THUMBV8M_MAIN_NONE_EABIHF_RUNNER='probe-rs run --chip RP235x --protocol swd' cargo run --release"
+
+[env]
+DEFMT_LOG = "info"
