@@ -2,7 +2,7 @@
 
 Brushless follow-up to the main [esp32-s3 quad](../README.md) - same overall goal, different everything else. Individual ESCs instead of MOSFET-driven brushed motors, RP2350 instead of ESP32-S3, plain `rustup`/stable instead of the Xtensa toolchain.
 
-Currently at the "one motor spins on the bench" stage - no IMU, no mixer, no control link wired up yet.
+Currently at the "3 of 4 motors spin on the bench via Oneshot125" stage - no IMU, no mixer, no control link wired up yet.
 
 ## Parts list (planned)
 
@@ -10,7 +10,7 @@ Currently at the "one motor spins on the bench" stage - no IMU, no mixer, no con
 | ------------------------------------------------------- | --- | --------------------------------------------------------------------------------------- |
 | RP2350 "mini zero"                                      | 1   | Pro Micro-footprint clone, 29 GPIO broken out                                           |
 | Happymodel SE0802 19000KV                               | 4   | brushless motor, matches Mobula7 spec                                                   |
-| Happymodel MX-5A / MX-5A-L                              | 4   | individual 1S ESC, BLHeli_S/Bluejay, one per motor                                      |
+| MX-5A / MX-5A-L (Buzzard Models)                        | 4   | individual 1S ESC, likely BLHeli_S/Bluejay ("BLS" in listing), one per motor            |
 | ICM-20948                                               | 1   | same IMU as the esp32-s3 build                                                          |
 | Happymodel Nano ELRS EP2                                | 1   | ELRS receiver, CRSF over UART - pairs with the RadioMaster Pocket's built-in ELRS radio |
 | 1S LiPo battery                                         | 1   |                                                                                         |
@@ -18,7 +18,8 @@ Currently at the "one motor spins on the bench" stage - no IMU, no mixer, no con
 
 ## Status
 
-- [x] single motor spins via standard servo-PWM on the bench (`src/main.rs`)
+- [x] single motor spins via standard servo-PWM on the bench (superseded, see below)
+- [x] 3 of 4 motors spin via Oneshot125 on the bench (`src/main.rs`, GPIO10/11/12) - motor 4 pending ESC replacement (first unit died during bench-PSU testing)
 - [ ] all 4 motors + mixer (reusing `libs::mixer`)
 - [ ] IMU + fusion (reusing `libs::flight::fusion`)
 - [ ] ELRS/CRSF control link via the Nano EP2, replacing `ground_control`'s WiFi/UDP link for this build
