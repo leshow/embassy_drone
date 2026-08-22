@@ -24,12 +24,10 @@ async fn main(_spawner: Spawner) {
     config.compare_a = ARM_US;
     config.compare_b = ARM_US;
 
-    // GPIO10/11 share PWM_SLICE5 (channel A/B) - one Pwm object drives both
+    // gpio 10/11 on pwm_slice5
     let mut esc_fl_fr = Pwm::new_output_ab(p.PWM_SLICE5, p.PIN_10, p.PIN_11, config.clone());
-    // GPIO12 is alone on PWM_SLICE6 channel A - only have 3 ESCs on hand right
-    // now (replacement for the smoked one hasn't arrived), so GPIO13/channel B
-    // sits unused for the moment
-    let mut esc_rl = Pwm::new_output_a(p.PWM_SLICE6, p.PIN_12, config.clone());
+    // gpio 12/13 are on pwm slice 6
+    let mut esc_rl_rr = Pwm::new_output_ab(p.PWM_SLICE6, p.PIN_12, p.PIN_13, config.clone());
 
     info!("arming ESCs, holding min throttle");
     Timer::after_secs(2).await;
@@ -39,7 +37,7 @@ async fn main(_spawner: Spawner) {
         config.compare_a = us;
         config.compare_b = us;
         esc_fl_fr.set_config(&config);
-        esc_rl.set_config(&config);
+        esc_rl_rr.set_config(&config);
         Timer::after_millis(50).await;
     }
 
@@ -51,14 +49,14 @@ async fn main(_spawner: Spawner) {
         config.compare_a = us;
         config.compare_b = us;
         esc_fl_fr.set_config(&config);
-        esc_rl.set_config(&config);
+        esc_rl_rr.set_config(&config);
         Timer::after_millis(50).await;
     }
 
     config.compare_a = ARM_US;
     config.compare_b = ARM_US;
     esc_fl_fr.set_config(&config);
-    esc_rl.set_config(&config);
+    esc_rl_rr.set_config(&config);
     info!("done, idling at min throttle");
 
     loop {

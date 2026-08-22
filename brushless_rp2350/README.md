@@ -40,10 +40,28 @@ Flash over USB/BOOTSEL (no debug probe needed - requires [picotool](https://gith
 cargo flash-usb
 ```
 
-Or, once SWD is soldered up to a raspberry pi debug probe, flash and get live `defmt` output:
+Or, once SWD is soldered up to a debug probe, flash and get live `defmt` output instead of BOOTSEL/picotool:
 
 ```sh
 cargo flash-probe
 ```
+
+### Setting up the debug probe
+
+For a Raspberry Pi Debug Probe or other CMSIS-DAP-compatible probe:
+
+1. Install `probe-rs`: `cargo install probe-rs-tools --locked`
+2. Linux udev rules, so the probe is accessible without root:
+
+   ```sh
+   sudo curl -fsSL https://probe.rs/files/69-probe-rs.rules -o /etc/udev/rules.d/69-probe-rs.rules
+   sudo udevadm control --reload
+   sudo udevadm trigger
+   ```
+
+3. Wire it up: use the probe's **"D"** (debug/SWD) port, not "U" (that's a separate plain UART). Standard 3-pin JST-SH cable: orange → SWCLK, black → GND, yellow → SWDIO. This board's SWD pins are bare pads, not a proper JST-SH connector, so you'll want the JST-SH-to-0.1"-header (female) cable variant to land on them.
+4. SWD carries no power - the RP2350 still needs its own USB cable connected separately for power, same as the BOOTSEL/picotool path. So two USB cables total: one to the RP2350, one to the probe itself.
+5. Raspberry Pi Debug Probes need firmware ≥2.2.0 for `probe-rs` to talk to them (older units commonly ship below that). Update via the [debugprobe releases page](https://github.com/raspberrypi/debugprobe/releases/latest): hold the probe's own BOOTSEL button while plugging it into USB, then copy `debugprobe.uf2` onto the mounted drive.
+6. Sanity check before flashing: `probe-rs list` should show the probe.
 
 See `.cargo/config.toml` for the alias definitions and notes on why the toolchain/tooling differs from the rest of the repo.
