@@ -7,7 +7,7 @@
 - 4× 100N03A N-channel MOSFET (one per motor)
 - 4× 10kΩ resistor (gate pull-down, one per MOSFET)
 - 4× 8520 brushed DC motor
-- 5V boost converter
+- 3.3V buck-boost converter
 - 2× 470μF electrolytic capacitor
 - 1S LiPo battery (3.7V)
 - 55mm or 65mm propellers
@@ -18,18 +18,18 @@
 
 ### Power
 
-| From                   | To                            | Notes                                 |
-| ---------------------- | ----------------------------- | ------------------------------------- |
-| Battery +              | Boost converter IN+           |                                       |
-| Battery −              | Boost converter IN−           |                                       |
-| Boost converter 5V out | ESP32 VIN                     | 5V regulated                          |
-| Boost converter GND    | ESP32 GND                     | Common ground for all logic           |
-| 470μF cap (boost) +    | Boost converter 5V out        | Positive leg to 5V out                |
-| 470μF cap (boost) −    | Boost converter GND           | Prevents brownout during motor inrush |
-| 470μF cap (battery) +  | Battery +                     | Second cap, across the battery rail   |
-| 470μF cap (battery) −  | Battery −                     |                                       |
-| Battery +              | motor+                        | Raw battery rail to motor switches    |
-| Battery − / GND        | All GND lines + mosfet source | Shared ground for motors and logic    |
+| From                          | To                            | Notes                                                                                           |
+| ----------------------------- | ----------------------------- | ----------------------------------------------------------------------------------------------- |
+| Battery +                     | Buck-boost converter IN+      |                                                                                                 |
+| Battery −                     | Buck-boost converter IN−      |                                                                                                 |
+| Buck-boost converter 3.3V out | ESP32 3V3 pin                 | Feeds the S3 directly, bypassing VIN and the board's own onboard regulator - see Assembly Notes |
+| Buck-boost converter GND      | ESP32 GND                     | Common ground for all logic                                                                     |
+| 470μF cap (buck-boost) +      | Buck-boost converter 3.3V out | Positive leg to 3.3V out                                                                        |
+| 470μF cap (buck-boost) −      | Buck-boost converter GND      | Prevents brownout during motor inrush                                                           |
+| 470μF cap (battery) +         | Battery +                     | Second cap, across the battery rail                                                             |
+| 470μF cap (battery) −         | Battery −                     |                                                                                                 |
+| Battery +                     | motor+                        | Raw battery rail to motor switches - not through the buck-boost                                 |
+| Battery − / GND               | All GND lines + mosfet source | Shared ground for motors and logic                                                              |
 
 ### ICM-20948 IMU (SPI)
 
@@ -37,15 +37,15 @@ Uses the ESP32-S3's actual dedicated IO_MUX FSPI pins (GPIO10-13), not
 GPIO-matrix-routed ones - avoids the extra input-delay ceiling on reliable
 SPI clock speed that GPIO-matrix routing would otherwise impose.
 
-| ICM-20948  | ESP32-S3 | Notes                                                                                                       |
-| ---------- | -------- | ----------------------------------------------------------------------------------------------------------- |
-| VIN        | 3.3V     | Regulated output from ESP32                                                                                 |
-| GND        | GND      |                                                                                                             |
-| SDI (SDA)  | GPIO11   | SPI MOSI                                                                                                    |
-| SCLK (SCL) | GPIO12   | SPI clock                                                                                                   |
-| SDO (AD0)  | GPIO13   | SPI MISO - if AD0 was tied to a fixed level for I2C addressing, remove that tie, it's the same physical pin |
-| nCS        | GPIO10   | Actively driven by the ESP32, not tied to a fixed level - see Assembly Notes                                |
-| INT        | GPIO6    | Data-ready interrupt                                                                                        |
+| ICM-20948  | ESP32-S3 | Notes                                                                                                                       |
+| ---------- | -------- | --------------------------------------------------------------------------------------------------------------------------- |
+| VIN        | 3.3V     | Same net as the buck-boost's output into the ESP32-S3's 3V3 pin, tapped in parallel - not the board's own onboard regulator |
+| GND        | GND      |                                                                                                                             |
+| SDI (SDA)  | GPIO11   | SPI MOSI                                                                                                                    |
+| SCLK (SCL) | GPIO12   | SPI clock                                                                                                                   |
+| SDO (AD0)  | GPIO13   | SPI MISO - if AD0 was tied to a fixed level for I2C addressing, remove that tie, it's the same physical pin                 |
+| nCS        | GPIO10   | Actively driven by the ESP32, not tied to a fixed level - see Assembly Notes                                                |
+| INT        | GPIO6    | Data-ready interrupt                                                                                                        |
 
 ### Motors (via 100N03A MOSFET)
 
@@ -65,8 +65,10 @@ Motor + on all four motors connects directly to Battery +. Motor − connects to
 ### ESP32-S3 Connections
 
 ```text
-          ┌───────────────────────┐
-   3.3V ──┤                       ├──► ICM-20948 VIN
+  Battery ──► [ Buck-Boost, 3.3V out ] ──► 3.3V rail
+                                              │
+          ┌───────────────────────┐          │
+   3.3V ──┤ (NOT BAT+/-)          ├──► ICM-20948 VIN
     GND ──┤                       ├──► ICM-20948 GND
           │       ESP32-S3        │
  GPIO11 ──┤ MOSI                  ├──► ICM-20948 SDI
@@ -127,8 +129,9 @@ Motor + on all four motors connects directly to Battery +. Motor − connects to
 - FSYNC (unused): tie to GND rather than leaving it floating — it's an edge-sensitive digital input, and a floating input near motor/ESC electrical noise can pick up spurious transitions even though nothing reads it currently
 - The 10kΩ gate–source resistor on each MOSFET holds the gate low when the ESP32 GPIO is floating (boot/reset), preventing unintended motor spin-up
 - MOSFETs are wired low-side: Drain to Motor −, Source to GND, Motor + connects directly to Battery +. N-channel MOSFETs cannot be used as high-side switches with a 3.3V gate signal
-- Solder one 470μF electrolytic capacitor across the boost converter 5V output and GND, as close to those pads as possible (positive leg to 5V). This prevents the ESP32 from browning out during motor inrush current spikes
-- (if using boost converter with bat +/- out) Solder the second 470μF electrolytic capacitor across Battery + and Battery −, as close to the battery leads as possible (positive leg to Battery +). This buffers the raw battery rail against motor inrush current
+- Solder one 470μF electrolytic capacitor across the buck-boost's 3.3V output and GND, as close to those pads as possible (positive leg to 3.3V). This prevents the ESP32 from browning out during motor inrush current spikes
+- Solder the second 470μF electrolytic capacitor across Battery + and Battery −, as close to the battery leads as possible (positive leg to Battery +). This buffers the raw battery rail against motor inrush current
+- The buck-boost's output goes to the ESP32-S3's **3V3 pin**, not the board's BAT+/BAT- pads. BAT+/BAT- feeds the board's onboard LiPo charge-management IC, which expects a raw, unregulated cell for charging - feeding it an actively-regulated 3.3V from the buck-boost instead can make the charge IC fight the buck-boost's own regulation. Leave BAT+/BAT- disconnected
 - All four MOSFET sources share GND; run a single wire to a bus point and branch from there
 - Keep IMU signal wires (MOSI/SCLK/MISO/CS/INT) routed away from motor wires to reduce noise coupling — this matters more for SPI than I2C was, since GPIO-matrix routing and breadboard/jumper signal integrity both degrade at the multi-MHz clock rates SPI runs at
-- The ESP32 3.3V output powers the IMU; do not connect IMU VIN to the 5V boost output
+- The ESP32 3.3V pin (fed by the buck-boost) also powers the IMU; do not connect IMU VIN anywhere else
