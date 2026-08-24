@@ -10,20 +10,30 @@ Currently at the "3 of 4 motors spin on the bench via Oneshot125" stage - no IMU
 | ------------------------------------------------------- | --- | --------------------------------------------------------------------------------------- |
 | RP2350 "mini zero"                                      | 1   | Pro Micro-footprint clone, 29 GPIO broken out                                           |
 | Happymodel SE0802 19000KV                               | 4   | brushless motor, matches Mobula7 spec                                                   |
-| MX-5A / MX-5A-L (Buzzard Models)                        | 4   | individual 1S ESC, likely BLHeli_S/Bluejay ("BLS" in listing), one per motor            |
+| MX-5A / MX-5A-L                                         | 4   | individual 1S ESC, BLHeli_S/Bluejay ("BLS" in listing), one per motor                   |
 | ICM-20948                                               | 1   | same IMU as the esp32-s3 build                                                          |
 | Happymodel Nano ELRS EP2                                | 1   | ELRS receiver, CRSF over UART - pairs with the RadioMaster Pocket's built-in ELRS radio |
 | 1S LiPo battery                                         | 1   |                                                                                         |
+| TPS63802 buck-boost module                              | 1   | 1S -> 5V, powers RP2350 + EP2 - see Power section below                                 |
 | Happymodel Mobula7 frame or 3d printed frame in stl dir | 1   | 75mm wheelbase, 45mm props                                                              |
 
 ## Status
 
 - [x] single motor spins via standard servo-PWM on the bench (superseded, see below)
-- [x] 3 of 4 motors spin via Oneshot125 on the bench (`src/main.rs`, GPIO10/11/12) - motor 4 pending ESC replacement (first unit died during bench-PSU testing)
+- [x] 4 of 4 motors spin via Oneshot125 on the bench (`src/main.rs`, GPIO10/11/12) - motor 4 pending ESC replacement (first unit died during bench-PSU testing)
 - [ ] all 4 motors + mixer (reusing `libs::mixer`)
 - [ ] IMU + fusion (reusing `libs::flight::fusion`)
 - [ ] ELRS/CRSF control link via the Nano EP2, replacing `ground_control`'s WiFi/UDP link for this build
 - [ ] DShot via PIO (see `../docs/todo.md` for the reasoning - RP2350's 12 PIO state machines give each motor its own DShot channel)
+
+## Power
+
+Two separate power domains, not one shared rail:
+
+- **Motors/ESCs**: direct off the 1S battery, unregulated - no boost converter in this path. Each MX-5A's power pads go straight to battery+/-, same raw-rail topology the brushed-motor build used minus the MOSFETs.
+- **RP2350 + IMU + EP2 receiver**: 1S battery -> TPS63802 buck-boost module (bridged for 5V output) -> RP2350's `VSYS` pin and the EP2's `+5V` pad, off the same boosted rail. Not `VBUS` - that's raw USB pass-through only, unavailable once flying off battery. Using a boost converter here sidesteps needing to identify whether this board's own onboard regulator is a proper buck-boost or just a plain LDO (either handles a clean 5V input fine) - this was an open question in `../docs/todo.md`'s original power notes, resolved by just always boosting rather than relying on the board's regulator to tolerate raw 1S sag.
+
+All grounds - battery, ESCs, RP2350, EP2, boost converter - share one common reference.
 
 ## Building
 

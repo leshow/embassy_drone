@@ -26,7 +26,10 @@ async fn main(_spawner: Spawner) {
 
     // gpio 10/11 on pwm_slice5
     let mut esc_fl_fr = Pwm::new_output_ab(p.PWM_SLICE5, p.PIN_10, p.PIN_11, config.clone());
-    // gpio 12/13 are on pwm slice 6
+    // gpio 12/13 are on pwm slice 6 - PIN_12 is hardware-fixed as channel A, PIN_13 as
+    // channel B (must be passed in that order), so compare_a controls GPIO12 (RR) and
+    // compare_b controls GPIO13 (RL) - doesn't matter yet since both get the same value
+    // below, but will matter once each motor needs an independently-mixed throttle
     let mut esc_rl_rr = Pwm::new_output_ab(p.PWM_SLICE6, p.PIN_12, p.PIN_13, config.clone());
 
     info!("arming ESCs, holding min throttle");
