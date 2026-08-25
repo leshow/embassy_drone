@@ -35,7 +35,7 @@ async fn main(_spawner: Spawner) {
     {
         let mut config = PwmConfig::default();
         // RP2350 default sys clock is 150MHz - divider 150 makes 1 tick = 1us,
-        // top 299 makes one period 300us (~3.3kHz refresh) - comfortably under
+        // top 299 makes one period 300us (~3.3kHz refresh) under
         // Oneshot125's ~4kHz ceiling
         config.divider = 150u8.into();
         config.top = 299;
@@ -60,8 +60,7 @@ async fn main(_spawner: Spawner) {
     }
 }
 
-// reads CRSF frames from the EP2 receiver and logs the parsed RC channels - doesn't
-// drive anything yet, just proves the radio link is being read correctly
+// reads CRSF frames from EP2 receiver
 #[embassy_executor::task]
 async fn read_radio(
     uart: Peri<'static, UART0>,
