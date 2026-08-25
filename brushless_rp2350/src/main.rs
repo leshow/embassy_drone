@@ -6,13 +6,9 @@ use defmt::info;
 use embassy_executor::Spawner;
 use embassy_rp::{
     Peri, bind_interrupts,
-    peripherals::{DMA_CH0, UART0},
-    uart::InterruptHandler as UartInterruptHandler,
-    uart::{Config as UartConfig, UartRx},
-};
-use embassy_rp::{
-    peripherals::{PIN_1, PWM_SLICE5, PWM_SLICE6},
+    peripherals::{DMA_CH0, PIN_1, PWM_SLICE5, PWM_SLICE6, UART0},
     pwm::{Config as PwmConfig, Pwm},
+    uart::{Config as UartConfig, InterruptHandler as UartInterruptHandler, UartRx},
 };
 use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
