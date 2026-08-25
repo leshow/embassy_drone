@@ -1,0 +1,4 @@
+{
+    "rust-analyzer.cargo.features": ["test_motors"],
+    "rust-analyzer.check.allTargets": true,
+}

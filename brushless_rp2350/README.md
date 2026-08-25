@@ -2,7 +2,7 @@
 
 Brushless follow-up to the main [esp32-s3 quad](../README.md) - same overall goal, different everything else. Individual ESCs instead of MOSFET-driven brushed motors, RP2350 instead of ESP32-S3, plain `rustup`/stable instead of the Xtensa toolchain.
 
-Currently at the "3 of 4 motors spin on the bench via Oneshot125" stage - no IMU, no mixer, no control link wired up yet.
+Currently at the "runs fully off battery, all 4 motors spin via Oneshot125, EP2 bound to the RadioMaster Pocket" stage - no IMU, no mixer, and the control link isn't read by firmware yet (bound at the RF level, not yet parsed in code).
 
 ## Parts list (planned)
 
@@ -20,10 +20,12 @@ Currently at the "3 of 4 motors spin on the bench via Oneshot125" stage - no IMU
 ## Status
 
 - [x] single motor spins via standard servo-PWM on the bench (superseded, see below)
-- [x] 4 of 4 motors spin via Oneshot125 on the bench (`src/main.rs`, GPIO10/11/12) - motor 4 pending ESC replacement (first unit died during bench-PSU testing)
+- [x] 4 of 4 motors spin via Oneshot125 on the bench (`src/main.rs`, GPIO10/11/12/13)
+- [x] TPS63802 boost converter + EP2 wired up, whole system (RP2350 + motors) runs and arms/spins purely off battery, no USB - confirms the VSYS/power decision above works in practice
+- [x] EP2 bound to the RadioMaster Pocket (solid LED) - RF link confirmed working end to end
+- [ ] EP2/CRSF actually read and parsed in firmware, replacing `ground_control`'s WiFi/UDP link for this build - bound and powered but `main.rs` doesn't consume anything from it yet (bench-test sequence only)
 - [ ] all 4 motors + mixer (reusing `libs::mixer`)
 - [ ] IMU + fusion (reusing `libs::flight::fusion`)
-- [ ] ELRS/CRSF control link via the Nano EP2, replacing `ground_control`'s WiFi/UDP link for this build
 - [ ] DShot via PIO (see `../docs/todo.md` for the reasoning - RP2350's 12 PIO state machines give each motor its own DShot channel)
 
 ## Power
