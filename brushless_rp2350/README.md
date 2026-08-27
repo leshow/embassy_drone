@@ -4,8 +4,8 @@ Brushless follow-up to the main [esp32-s3 quad](../README.md) - same overall goa
 
 Currently at the "runs fully off battery, all 4 motors spin via Oneshot125, EP2 bound to the RadioMaster Pocket" stage - no IMU, no mixer, and the control link isn't read by firmware yet (bound at the RF level, not yet parsed in code).
 
-![drone frame](/images/front.png)
-![drone frame](/images/side.png)
+![drone frame](/brushless_rp2350/images/front.png)
+![drone frame](/brushless_rp2350/images/side.png)
 
 ## Parts list (planned)
 
