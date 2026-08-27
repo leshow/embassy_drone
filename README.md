@@ -4,7 +4,7 @@ currently still a work in progress, building a (very) mini quadcopter for esp32 
 
 ## rp2350 brushless version
 
-I've also started a version with brushless motors, a proper ESC and ELRS transmitter under `brushless_rp2350/`. This one is currently WIP as well.
+I've also started a version with brushless motors, a proper ESC and ELRS transmitter under [`brushless_rp2350/`](/brushless_rp2350). This one is currently WIP as well.
 
 ## Quad assets
 
