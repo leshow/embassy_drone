@@ -1,4 +1,4 @@
-# mini quadcopter in Rust w/ embassy for esp32 (WIP)
+# mini quadcopter in Rust w/ embassy for esp32 and rp2350 (WIP)
 
 currently still a work in progress, building a (very) mini quadcopter for esp32 on bare metal with [embassy.dev](https://embassy.dev). running on the esp32-s3 - the extra core lets the flight loop and WiFi run fully independently, and the hardware FPU matters a lot for the fusion/filter math (see `docs/s3-migration.md`).
 
