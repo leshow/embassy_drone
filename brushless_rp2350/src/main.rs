@@ -6,17 +6,14 @@ use embassy_executor::Spawner;
 use embassy_rp::{
     Peri, bind_interrupts,
     gpio::{Input, Level, Output, Pull},
-    peripherals::{
-        DMA_CH0, DMA_CH1, DMA_CH2, PIN_2, PIN_3, PIN_4, PIN_5, PIN_6, PWM_SLICE5, PWM_SLICE6, SPI0,
-        UART0,
-    },
+    peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, PIN_6, PWM_SLICE5, PWM_SLICE6, UART0},
     pwm::{Config as PwmConfig, Pwm},
     spi::{Config as SpiConfig, Spi},
     uart::InterruptHandler as UartInterruptHandler,
 };
 use embassy_time::{Delay, Instant, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
-use icm426xx::{Config as ImuConfig, ICM42688};
+use icm426xx::{Config as ImuConfig, ICM42688, OutputDataRate};
 use libs::flight::fusion::{FusionBuilder, RAD_TO_DEG};
 use nalgebra::Vector3;
 use {defmt_rtt as _, panic_probe as _};
@@ -63,65 +60,48 @@ async fn main(spawner: Spawner) {
     }
 
     #[cfg(feature = "visualize")]
-    visualize(
-        p.SPI0, p.PIN_2, p.PIN_3, p.PIN_4, p.PIN_5, p.PIN_6, p.DMA_CH1, p.DMA_CH2,
-    )
-    .await;
+    {
+        // 3MHz, under ICM42688's 24MHz SPI ceiling
+        let mut spi_config = SpiConfig::default();
+        spi_config.frequency = 3_000_000;
+        let spi_bus = Spi::new(
+            p.SPI0, p.PIN_2, p.PIN_3, p.PIN_4, p.DMA_CH1, p.DMA_CH2, Irqs, spi_config,
+        );
+        let cs = Output::new(p.PIN_5, Level::High);
+        let device = ExclusiveDevice::new_no_delay(spi_bus, cs).unwrap();
+
+        // 1kHz read rate
+        let imu_config = ImuConfig {
+            rate: OutputDataRate::Hz1000,
+            ..Default::default()
+        };
+        // initialize() soft-resets the sensor and checks WHO_AM_I internally (expects 0x47)
+        match ICM42688::new(device).initialize(Delay, imu_config).await {
+            Ok(icm) => visualize(icm, p.PIN_6).await,
+            Err(e) => error!("ICM42688 init failed: {}", e),
+        }
+    }
 
     loop {
         Timer::after_secs(60).await;
     }
 }
 
-// ICM42688 wiring check + live fusion dump: init the sensor over SPI, confirm WHO_AM_I comes
-// back correct
+// live fusion dump
 // it can be piped into `visualizer` the same way the esp32-s3 project does:
 // `cargo flash-probe --features visualize | (cd ../visualizer && cargo run)`
 //
-// SCLK/MOSI/MISO are fixed to GPIO2/3/4 by the RP2350's pin mux (SPI0), CS is a plain GPIO
-// (GPIO5) toggled by ExclusiveDevice. INT1 (GPIO6) drives sampling off the data-ready
+// INT1 (GPIO6) drives sampling off the data-ready pulse - ICM42688 config default is 200Hz
+// ODR, latched/active-high, and read_sample()'s first SPI byte reads INT_STATUS which clears
+// the latch
 #[cfg(feature = "visualize")]
-#[allow(clippy::too_many_arguments)]
-async fn visualize(
-    spi: Peri<'static, SPI0>,
-    clk: Peri<'static, PIN_2>,
-    mosi: Peri<'static, PIN_3>,
-    miso: Peri<'static, PIN_4>,
-    cs: Peri<'static, PIN_5>,
-    int1: Peri<'static, PIN_6>,
-    tx_dma: Peri<'static, DMA_CH1>,
-    rx_dma: Peri<'static, DMA_CH2>,
-) {
-    // 1MHz to start
-    let spi_bus = Spi::new(
-        spi,
-        clk,
-        mosi,
-        miso,
-        tx_dma,
-        rx_dma,
-        Irqs,
-        SpiConfig::default(),
-    );
-    let cs = Output::new(cs, Level::High);
-    let device = ExclusiveDevice::new_no_delay(spi_bus, cs).unwrap();
-
-    // initialize() soft-resets the sensor and checks WHO_AM_I internally (expects 0x47)
-    let mut icm = match ICM42688::new(device)
-        .initialize(Delay, ImuConfig::default())
-        .await
-    {
-        Ok(icm) => icm,
-        Err(e) => {
-            error!("ICM42688 init failed: {}", e);
-            return;
-        }
-    };
+async fn visualize<SPI>(mut icm: ICM42688<SPI, icm426xx::Ready>, int1: Peri<'static, PIN_6>)
+where
+    SPI: embedded_hal_async::spi::SpiDevice,
+    SPI::Error: defmt::Format,
+{
     info!("ICM42688 init OK, WHO_AM_I matched");
 
-    // ICM42688 config default is 200Hz ODR - INT1 pulses (latched, active-high, push-pull)
-    // once a sample lands in the FIFO, and read_sample()'s first SPI byte reads INT_STATUS
-    // which clears the latch, so this can't spin like the ICM20948's DMP-era gotcha did
     let mut int1 = Input::new(int1, Pull::None);
     let mut fusion = FusionBuilder::new().icm42688().madgwick().build();
     let mut last = Instant::now();
