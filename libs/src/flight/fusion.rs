@@ -52,6 +52,7 @@ pub struct Fusion<S, F> {
 
 pub struct ICM20948; // 9DOF: accel + gyro + mag
 pub struct MPU6050; // 6DOF: accel + gyro only
+pub struct ICM42688; // 6DOF: accel + gyro only, no onboard mag
 
 // Filter types — each carries its own runtime state
 pub struct Complementary {
@@ -129,6 +130,18 @@ impl<F> FusionBuilder<NoSensor, F> {
     }
 
     pub fn mpu6050(self) -> FusionBuilder<MPU6050, F> {
+        FusionBuilder {
+            alpha: self.alpha,
+            beta: self.beta,
+            kp: self.kp,
+            ki: self.ki,
+            sample_period: self.sample_period,
+            _sensor: PhantomData,
+            _filter: PhantomData,
+        }
+    }
+
+    pub fn icm42688(self) -> FusionBuilder<ICM42688, F> {
         FusionBuilder {
             alpha: self.alpha,
             beta: self.beta,
@@ -311,6 +324,20 @@ impl FusionBuilder<MPU6050, Complementary> {
     }
 }
 
+impl FusionBuilder<ICM42688, Complementary> {
+    pub fn build(self) -> Fusion<ICM42688, Complementary> {
+        Fusion {
+            filter: Complementary {
+                angle_roll: 0.0,
+                angle_pitch: 0.0,
+                angle_yaw: 0.0,
+                alpha: self.alpha,
+            },
+            _sensor: PhantomData,
+        }
+    }
+}
+
 impl FusionBuilder<ICM20948, Madgwick> {
     pub fn build(self) -> Fusion<ICM20948, Madgwick> {
         Fusion {
@@ -328,6 +355,21 @@ impl FusionBuilder<ICM20948, Madgwick> {
 
 impl FusionBuilder<MPU6050, Madgwick> {
     pub fn build(self) -> Fusion<MPU6050, Madgwick> {
+        Fusion {
+            filter: Madgwick {
+                inner: UfMadgwick::new(
+                    Duration::from_secs_f32(self.sample_period),
+                    MadgwickParams { beta: self.beta },
+                ),
+                beta: self.beta,
+            },
+            _sensor: PhantomData,
+        }
+    }
+}
+
+impl FusionBuilder<ICM42688, Madgwick> {
+    pub fn build(self) -> Fusion<ICM42688, Madgwick> {
         Fusion {
             filter: Madgwick {
                 inner: UfMadgwick::new(
@@ -367,6 +409,19 @@ impl FusionBuilder<MPU6050, Vqf> {
     }
 }
 
+impl FusionBuilder<ICM42688, Vqf> {
+    pub fn build(self) -> Fusion<ICM42688, Vqf> {
+        let params = VqfParams::default();
+        Fusion {
+            filter: Vqf {
+                inner: UfVqf::new(Duration::from_secs_f32(self.sample_period), params.clone()),
+                params,
+            },
+            _sensor: PhantomData,
+        }
+    }
+}
+
 impl FusionBuilder<ICM20948, Mahony> {
     pub fn build(self) -> Fusion<ICM20948, Mahony> {
         let params = MahonyParams {
@@ -385,6 +440,22 @@ impl FusionBuilder<ICM20948, Mahony> {
 
 impl FusionBuilder<MPU6050, Mahony> {
     pub fn build(self) -> Fusion<MPU6050, Mahony> {
+        let params = MahonyParams {
+            kp: self.kp,
+            ki: self.ki,
+        };
+        Fusion {
+            filter: Mahony {
+                inner: UfMahony::new(Duration::from_secs_f32(self.sample_period), params),
+                params,
+            },
+            _sensor: PhantomData,
+        }
+    }
+}
+
+impl FusionBuilder<ICM42688, Mahony> {
+    pub fn build(self) -> Fusion<ICM42688, Mahony> {
         let params = MahonyParams {
             kp: self.kp,
             ki: self.ki,
@@ -434,6 +505,32 @@ impl Fusion<ICM20948, Complementary> {
 }
 
 impl Fusion<MPU6050, Complementary> {
+    /// 6DOF complementary filter.
+    /// `acc_angles` is the output of `mpu.get_acc_angles()`: [roll_rad, pitch_rad].
+    /// No magnetometer — yaw is fixed at 0. Returns orientation as a quaternion.
+    pub fn update(
+        &mut self,
+        dt: f32,
+        acc_angles: Vector2<f32>,
+        g: Vector3<f32>,
+    ) -> UnitQuaternion<f32> {
+        let this = &mut self.filter;
+        (this.angle_roll, this.angle_pitch) = utils::complementary_filter(
+            this.angle_roll,
+            this.angle_pitch,
+            g.x,
+            g.y,
+            dt,
+            acc_angles[0],
+            acc_angles[1],
+            this.alpha,
+        );
+
+        UnitQuaternion::from_euler_angles(this.angle_roll, this.angle_pitch, 0.0)
+    }
+}
+
+impl Fusion<ICM42688, Complementary> {
     /// 6DOF complementary filter.
     /// `acc_angles` is the output of `mpu.get_acc_angles()`: [roll_rad, pitch_rad].
     /// No magnetometer — yaw is fixed at 0. Returns orientation as a quaternion.
@@ -515,6 +612,23 @@ impl Fusion<MPU6050, Madgwick> {
     }
 }
 
+impl Fusion<ICM42688, Madgwick> {
+    /// 6DOF Madgwick IMU-only via `uf-ahrs`. Yaw will drift.
+    /// Returns orientation as a quaternion.
+    pub fn update(&mut self, dt: f32, a: Vector3<f32>, g: Vector3<f32>) -> UnitQuaternion<f32> {
+        let dt = Duration::from_secs_f32(dt.max(0.0001));
+        let current_q = self.filter.inner.orientation();
+        self.filter.inner = UfMadgwick::new_with_orientation(
+            dt,
+            MadgwickParams {
+                beta: self.filter.beta,
+            },
+            current_q,
+        );
+        self.filter.inner.update_imu(g, a)
+    }
+}
+
 impl Fusion<ICM20948, Vqf> {
     /// 9DOF VQF MARG via `uf-ahrs`.
     /// Rebuilds with the actual measured dt each call (trades bias-estimator history for correct timing).
@@ -545,6 +659,18 @@ impl Fusion<ICM20948, Vqf> {
 }
 
 impl Fusion<MPU6050, Vqf> {
+    /// 6DOF VQF IMU-only via `uf-ahrs`. Yaw will drift.
+    /// Returns orientation as a quaternion.
+    pub fn update(&mut self, dt: f32, a: Vector3<f32>, g: Vector3<f32>) -> UnitQuaternion<f32> {
+        let dt = Duration::from_secs_f32(dt.max(0.0001));
+        let current_q = self.filter.inner.orientation();
+        self.filter.inner = UfVqf::new(dt, self.filter.params.clone());
+        self.filter.inner.set_orientation(current_q);
+        self.filter.inner.update_imu(g, a)
+    }
+}
+
+impl Fusion<ICM42688, Vqf> {
     /// 6DOF VQF IMU-only via `uf-ahrs`. Yaw will drift.
     /// Returns orientation as a quaternion.
     pub fn update(&mut self, dt: f32, a: Vector3<f32>, g: Vector3<f32>) -> UnitQuaternion<f32> {
@@ -612,6 +738,19 @@ impl Fusion<ICM20948, Mahony> {
 }
 
 impl Fusion<MPU6050, Mahony> {
+    /// 6DOF Mahony IMU-only via `uf-ahrs`. Yaw will drift.
+    /// Returns orientation as a quaternion.
+    pub fn update_imu(&mut self, dt: f32, a: Vector3<f32>, g: Vector3<f32>) -> UnitQuaternion<f32> {
+        let dt = Duration::from_secs_f32(dt.max(0.0001));
+        let current_q = self.filter.inner.orientation();
+        let bias = self.filter.inner.bias;
+        self.filter.inner = UfMahony::new_with_orientation(dt, self.filter.params, current_q);
+        self.filter.inner.bias = bias;
+        self.filter.inner.update_imu(g, a)
+    }
+}
+
+impl Fusion<ICM42688, Mahony> {
     /// 6DOF Mahony IMU-only via `uf-ahrs`. Yaw will drift.
     /// Returns orientation as a quaternion.
     pub fn update_imu(&mut self, dt: f32, a: Vector3<f32>, g: Vector3<f32>) -> UnitQuaternion<f32> {

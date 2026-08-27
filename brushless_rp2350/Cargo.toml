@@ -32,12 +32,18 @@ cortex-m-rt = "0.7"
 critical-section = "1"
 static_cell = "2"
 embedded-hal-async = "1.0"
+embedded-hal-bus = { version = "0.3", features = ["async", "defmt-03"] }
+icm426xx = { version = "0.4", features = ["async", "defmt"] }
+nalgebra = { version = "0.35", default-features = false, features = [
+    "libm-force",
+] }
 
 libs = { path = "../libs", default-features = false }
 
 [features]
 default = []
 test_motors = []
+visualize = []
 
 [profile.release]
 debug = true
