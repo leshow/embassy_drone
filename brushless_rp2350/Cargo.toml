@@ -34,6 +34,7 @@ static_cell = "2"
 embedded-hal-async = "1.0"
 embedded-hal-bus = { version = "0.3", features = ["async", "defmt-03"] }
 icm426xx = { version = "0.4", features = ["async", "defmt"] }
+embassy-dshot = { version = "0.3", features = ["rp2350", "defmt"] }
 nalgebra = { version = "0.35", default-features = false, features = [
     "libm-force",
 ] }
@@ -42,7 +43,8 @@ libs = { path = "../libs", default-features = false }
 
 [features]
 default = []
-test_motors = []
+test_oneshot = []
+test_dshot = []
 visualize = []
 
 [profile.release]

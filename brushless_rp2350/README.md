@@ -29,7 +29,7 @@ Currently at the "runs fully off battery, all 4 motors spin via Oneshot125, EP2 
 - [ ] EP2/CRSF actually read and parsed in firmware, replacing `ground_control`'s WiFi/UDP link for this build - bound and powered but `main.rs` doesn't consume anything from it yet (bench-test sequence only)
 - [ ] all 4 motors + mixer (reusing `libs::mixer`)
 - [x] IMU + fusion (reusing `libs::flight::fusion`)
-- [ ] DShot via PIO (see `../docs/todo.md` for the reasoning - RP2350's 12 PIO state machines give each motor its own DShot channel)
+- [x] DShot via PIO
 
 ## Power
 

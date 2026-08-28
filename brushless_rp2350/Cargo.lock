@@ -143,6 +143,7 @@ dependencies = [
  "crsf",
  "defmt 1.1.1",
  "defmt-rtt",
+ "embassy-dshot",
  "embassy-executor",
  "embassy-rp",
  "embassy-time",
@@ -486,6 +487,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dshot-frame"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccace5cb9d5d33d71bfb679043feb6bf384a2be1950f02880c3d9c5d8f01cc83"
+
+[[package]]
 name = "dsp-fixedpoint"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -506,6 +513,19 @@ name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
+
+[[package]]
+name = "embassy-dshot"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f79f5490c807a8e4003c60d78b4142475769e0346690cb15a187739e835e8283"
+dependencies = [
+ "defmt 1.1.1",
+ "dshot-frame",
+ "embassy-rp",
+ "embassy-time",
+ "fixed",
+]
 
 [[package]]
 name = "embassy-embedded-hal"
