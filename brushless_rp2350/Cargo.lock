@@ -146,6 +146,7 @@ dependencies = [
  "embassy-dshot",
  "embassy-executor",
  "embassy-rp",
+ "embassy-sync",
  "embassy-time",
  "embedded-hal-async",
  "embedded-hal-bus",

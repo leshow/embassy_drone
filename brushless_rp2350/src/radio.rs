@@ -5,9 +5,15 @@ use embassy_rp::{
     peripherals::{DMA_CH0, PIN_1, UART0},
     uart::{Config as UartConfig, UartRx},
 };
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch::Watch};
+use embassy_time::Instant;
 use {defmt_rtt as _, panic_probe as _};
 
 use crate::Irqs;
+
+// latest control input radio w/ timestamp
+// watch keeps only latest value for some const num of recvers
+pub static CONTROLS: Watch<CriticalSectionRawMutex, (Controls, Instant), 1> = Watch::new();
 
 // reads CRSF frames from EP2 receiver
 #[embassy_executor::task]
@@ -28,6 +34,7 @@ pub async fn read_radio(
     // identical line every ~4ms even while every stick/switch is sitting still, which makes
     // it hard to tell which index moved when testing channel mapping by hand
     let mut last: Option<[u16; 16]> = None;
+    let tx = CONTROLS.sender();
 
     loop {
         // read is opportunistic so it will return immediately if there are more bytes,
@@ -39,6 +46,7 @@ pub async fn read_radio(
                     && last != Some(channels.0)
                 {
                     let ctrl = Controls::from(&channels);
+                    tx.send((ctrl, Instant::now()));
                     debug!("control packet: {:?}", defmt::Debug2Format(&ctrl));
                     last = Some(channels.0);
                 }
