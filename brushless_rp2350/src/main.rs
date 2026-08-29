@@ -10,13 +10,16 @@ use embassy_rp::{
     spi::{Config as SpiConfig, Spi},
     uart::InterruptHandler as UartInterruptHandler,
 };
-use embassy_time::{Delay, Instant, Timer};
+use embassy_time::{Instant, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
-use icm426xx::{Config as ImuConfig, ICM42688, OutputDataRate};
-use libs::flight::fusion::{FusionBuilder, RAD_TO_DEG};
-use nalgebra::Vector3;
 use {defmt_rtt as _, panic_probe as _};
 
+use libs::flight::{
+    fusion::{FusionBuilder, RAD_TO_DEG},
+    sensors::ImuRead,
+};
+
+mod imu;
 mod motors;
 mod radio;
 
@@ -51,6 +54,8 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "visualize")]
     {
         // 3MHz, under ICM42688's 24MHz SPI ceiling
+
+        use crate::imu::Sensor;
         let mut spi_config = SpiConfig::default();
         spi_config.frequency = 3_000_000;
         let spi_bus = Spi::new(
@@ -59,13 +64,8 @@ async fn main(spawner: Spawner) {
         let cs = Output::new(p.PIN_5, Level::High);
         let device = ExclusiveDevice::new_no_delay(spi_bus, cs).unwrap();
 
-        // 1kHz read rate
-        let imu_config = ImuConfig {
-            rate: OutputDataRate::Hz1000,
-            ..Default::default()
-        };
         // initialize() soft-resets the sensor and checks WHO_AM_I internally (expects 0x47)
-        match ICM42688::new(device).initialize(Delay, imu_config).await {
+        match Sensor::init(device).await {
             Ok(icm) => visualize(icm, p.PIN_6).await,
             Err(e) => error!("ICM42688 init failed: {}", e),
         }
@@ -84,33 +84,27 @@ async fn main(spawner: Spawner) {
 // ODR, latched/active-high, and read_sample()'s first SPI byte reads INT_STATUS which clears
 // the latch
 #[cfg(feature = "visualize")]
-async fn visualize<SPI>(mut icm: ICM42688<SPI, icm426xx::Ready>, int1: Peri<'static, PIN_6>)
-where
-    SPI: embedded_hal_async::spi::SpiDevice,
-    SPI::Error: defmt::Format,
+async fn visualize<D>(
+    mut imu: crate::imu::Sensor<icm426xx::ICM42688<D, icm426xx::Ready>>,
+    int1: Peri<'static, PIN_6>,
+) where
+    D: embedded_hal_async::spi::SpiDevice,
+    D::Error: defmt::Format,
 {
-    info!("ICM42688 init OK, WHO_AM_I matched");
-
     let mut int1 = Input::new(int1, Pull::None);
     let mut fusion = FusionBuilder::new().icm42688().madgwick().build();
     let mut last = Instant::now();
 
     loop {
+        // TODO: can try without wait_for_high if there are issues
         int1.wait_for_high().await;
-        match icm.read_sample().await {
-            Ok(Some((sample, _more_in_fifo))) => {
-                let (Some(accel), Some(gyro)) = (sample.accel, sample.gyro) else {
-                    continue;
-                };
+        match imu.read().await {
+            Ok((accel, gyro)) => {
                 let now = Instant::now();
                 let dt = now.duration_since(last).as_micros() as f32 / 1_000_000.0;
                 last = now;
 
-                let quat = fusion.update(
-                    dt,
-                    Vector3::new(accel.0, accel.1, accel.2),
-                    Vector3::new(gyro.0, gyro.1, gyro.2),
-                );
+                let quat = fusion.update(dt, accel, gyro);
                 let (roll, pitch, yaw) = quat.euler_angles();
                 info!(
                     "roll: {}\u{b0} pitch: {}\u{b0} yaw: {}\u{b0}",
@@ -119,7 +113,6 @@ where
                     yaw * RAD_TO_DEG
                 );
             }
-            Ok(None) => {}
             Err(e) => error!("ICM42688 read_sample failed: {}", e),
         }
     }

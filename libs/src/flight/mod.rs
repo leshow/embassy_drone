@@ -1,6 +1,7 @@
 pub mod filters;
 pub mod fusion;
 pub mod pid;
+pub mod sensors;
 
 use nalgebra::Vector3;
 

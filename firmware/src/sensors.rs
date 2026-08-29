@@ -14,17 +14,7 @@ use icm20948_async::{
 use mpu9250_async::{Mpu6050, Mpu6050Error};
 use nalgebra::{Vector2, Vector3};
 
-pub trait ImuRead {
-    type Error;
-    /// Returns (accel, gyro). For 6DOF sensors; accel is (roll_rad, pitch_rad, 0.0).
-    async fn read(&mut self) -> Result<(Vector3<f32>, Vector3<f32>), Self::Error>;
-}
-
-pub trait ImuReadMag: ImuRead {
-    /// Returns (accel, gyro, mag). For 9DOF sensors.
-    async fn read_mag(&mut self)
-    -> Result<(Vector3<f32>, Vector3<f32>, Vector3<f32>), Self::Error>;
-}
+use libs::flight::sensors::{ImuRead, ImuReadMag};
 
 pub struct Sensor<D> {
     driver: D,

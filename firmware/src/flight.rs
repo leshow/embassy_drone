@@ -4,13 +4,13 @@ use esp_hal::gpio;
 use libs::telemetry::TelemetryPacket;
 use nalgebra::{UnitQuaternion, Vector3};
 
-use crate::sensors::ImuRead;
-#[cfg(feature = "mag")]
-use crate::sensors::ImuReadMag;
 use crate::{Motors, Sensor20948, wifi};
 pub use libs::flight::AccelBias;
 #[cfg(feature = "mag")]
 use libs::flight::fusion::MargFusion;
+use libs::flight::sensors::ImuRead;
+#[cfg(feature = "mag")]
+use libs::flight::sensors::ImuReadMag;
 use libs::flight::{filters, fusion, fusion::ImuFusion, pid::Pid};
 
 // publishes a telemetry snapshot for the wifi udp_task to reply with on the next control packet.
