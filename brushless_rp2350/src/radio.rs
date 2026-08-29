@@ -2,14 +2,14 @@ use crsf::{Packet, PacketParser, RcChannels};
 use defmt::debug;
 use embassy_rp::{
     Peri,
-    peripherals::{DMA_CH0, PIN_1, UART0},
+    peripherals::PIN_1,
     uart::{Config as UartConfig, UartRx},
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch::Watch};
 use embassy_time::Instant;
 use {defmt_rtt as _, panic_probe as _};
 
-use crate::Irqs;
+use crate::{Irqs, RadioDma, RadioUart};
 
 // latest control input radio w/ timestamp
 // watch keeps only latest value for some const num of recvers
@@ -18,9 +18,9 @@ pub static CONTROLS: Watch<CriticalSectionRawMutex, (Controls, Instant), 1> = Wa
 // reads CRSF frames from EP2 receiver
 #[embassy_executor::task]
 pub async fn read_radio(
-    uart: Peri<'static, UART0>,
+    uart: Peri<'static, RadioUart>,
     rx_pin: Peri<'static, PIN_1>,
-    dma: Peri<'static, DMA_CH0>,
+    dma: Peri<'static, RadioDma>,
 ) {
     let mut uart_config = UartConfig::default();
     // CRSF: 420000 baud

@@ -2,34 +2,40 @@
 #![no_main]
 
 use defmt::{error, info};
-use embassy_dshot::{Command, DshotPioAsync, DshotSpeed, rp::DshotPio};
 use embassy_executor::Spawner;
 use embassy_rp::{
     Peri, bind_interrupts,
     gpio::{Input, Level, Output, Pull},
-    peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, PIN_6, PIO0, UART0},
+    peripherals::{PIN_6, PIO0},
     spi::{Config as SpiConfig, Spi},
     uart::InterruptHandler as UartInterruptHandler,
 };
-use embassy_time::{Delay, Duration, Instant, Timer};
+use embassy_time::{Delay, Instant, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use icm426xx::{Config as ImuConfig, ICM42688, OutputDataRate};
 use libs::flight::fusion::{FusionBuilder, RAD_TO_DEG};
 use nalgebra::Vector3;
 use {defmt_rtt as _, panic_probe as _};
 
+mod motors;
 mod radio;
 
-// DShot throttle range is 0-1999 (embassy-dshot's own 0-based abstraction over the raw
-// 48-2047 DShot wire values - THROTTLE_IDLE is already 0, no offset needed on our end)
-const DSHOT_TARGET_THROTTLE: u16 = 400; // ~20%, same bench-spin level as the Oneshot125 test
-const DSHOT_RAMP_STEPS: u32 = 100;
-const DSHOT_HOLD_ITERATIONS: u32 = 100; // 100 * 20ms = 2s
-const DSHOT_STEP_DELAY_MS: u64 = 20;
+use motors::Motors;
+
+// physical wiring
+pub type MotorFl = embassy_rp::peripherals::PIN_10;
+pub type MotorFr = embassy_rp::peripherals::PIN_11;
+pub type MotorRl = embassy_rp::peripherals::PIN_12;
+pub type MotorRr = embassy_rp::peripherals::PIN_13;
+
+pub type RadioUart = embassy_rp::peripherals::UART0;
+pub type RadioDma = embassy_rp::peripherals::DMA_CH0;
+pub type ImuTxDma = embassy_rp::peripherals::DMA_CH1;
+pub type ImuRxDma = embassy_rp::peripherals::DMA_CH2;
 
 bind_interrupts!(struct Irqs {
-    UART0_IRQ => UartInterruptHandler<UART0>;
-    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<DMA_CH0>, embassy_rp::dma::InterruptHandler<DMA_CH1>, embassy_rp::dma::InterruptHandler<DMA_CH2>;
+    UART0_IRQ => UartInterruptHandler<RadioUart>;
+    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<RadioDma>, embassy_rp::dma::InterruptHandler<ImuTxDma>, embassy_rp::dma::InterruptHandler<ImuRxDma>;
     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO0>;
 });
 
@@ -119,62 +125,66 @@ where
     }
 }
 
-// same GPIO10-13 wiring as test_oneshot, but driven by PIO instead of PWM_SLICE5/6 - each
-// motor gets its own independent state machine
-// unlike PWM (a free-running hardware counter that keeps outputting once configured), DShot
-// frames are one-shot pushes to the PIO FIFO - nothing repeats on its own, so every phase
-// (including the hold) has to keep sending frames at a steady rate or the ESCs will fail-safe
+// same GPIO10-13 wiring as test_oneshot, but driven through the real Motors abstraction
+// (motors.rs) instead of raw PWM_SLICE5/6 - each motor gets its own independent PIO state
+// machine. Motors::init already arms; unlike PWM (a free-running hardware counter that keeps
+// outputting once configured), DShot frames are one-shot pushes to the PIO FIFO - nothing
+// repeats on its own, so every phase (including the hold) has to keep calling set_motors at a
+// steady rate or the ESCs will fail-safe
 #[cfg(feature = "test_dshot")]
 async fn test_dshot(
     pio: Peri<'static, PIO0>,
-    pin_10: Peri<'static, embassy_rp::peripherals::PIN_10>,
-    pin_11: Peri<'static, embassy_rp::peripherals::PIN_11>,
-    pin_12: Peri<'static, embassy_rp::peripherals::PIN_12>,
-    pin_13: Peri<'static, embassy_rp::peripherals::PIN_13>,
+    fl: Peri<'static, MotorFl>,
+    fr: Peri<'static, MotorFr>,
+    rl: Peri<'static, MotorRl>,
+    rr: Peri<'static, MotorRr>,
 ) {
-    let mut dshot = DshotPio::<4, PIO0>::new(
-        pio,
-        Irqs,
-        pin_10,
-        pin_11,
-        pin_12,
-        pin_13,
-        DshotSpeed::DShot300,
-    );
+    // Motors::set_motors takes normalized [0.0, 1.0], not raw DShot 0-1999 values
+    const TARGET_THROTTLE: f32 = 0.2; // ~20%, same bench-spin level as the Oneshot125 test
+    const RAMP_STEPS: u32 = 100;
+    const HOLD_ITERATIONS: u32 = 100; // 100 * 20ms = 2s
+    const STEP_DELAY_MS: u64 = 20;
 
-    info!("arming ESCs");
-    dshot.arm_async(Duration::from_secs(2)).await;
+    let mut motors = Motors::init(pio, fl, fr, rl, rr).await;
 
     // straight to target instead of ramping - diagnostic for whether the staggered start seen
     // during the ramp is just different motors crossing their own spin-up threshold at
     // different points along it, rather than a real per-channel timing difference
     info!("jumping straight to bench spin, no ramp");
-    dshot
-        .throttle_async([DSHOT_TARGET_THROTTLE; 4])
-        .await
-        .unwrap();
+    motors
+        .set_motors(
+            TARGET_THROTTLE,
+            TARGET_THROTTLE,
+            TARGET_THROTTLE,
+            TARGET_THROTTLE,
+        )
+        .await;
 
     info!("holding bench spin");
-    for _ in 0..DSHOT_HOLD_ITERATIONS {
-        dshot
-            .throttle_async([DSHOT_TARGET_THROTTLE; 4])
-            .await
-            .unwrap();
-        Timer::after_millis(DSHOT_STEP_DELAY_MS).await;
+    for _ in 0..HOLD_ITERATIONS {
+        motors
+            .set_motors(
+                TARGET_THROTTLE,
+                TARGET_THROTTLE,
+                TARGET_THROTTLE,
+                TARGET_THROTTLE,
+            )
+            .await;
+        Timer::after_millis(STEP_DELAY_MS).await;
     }
 
     info!("ramping down to idle");
-    for i in (0..=DSHOT_RAMP_STEPS).rev() {
-        let t = (DSHOT_TARGET_THROTTLE as u32 * i / DSHOT_RAMP_STEPS) as u16;
-        dshot.throttle_async([t; 4]).await.unwrap();
-        Timer::after_millis(DSHOT_STEP_DELAY_MS).await;
+    for i in (0..=RAMP_STEPS).rev() {
+        let t = TARGET_THROTTLE * (i as f32 / RAMP_STEPS as f32);
+        motors.set_motors(t, t, t, t).await;
+        Timer::after_millis(STEP_DELAY_MS).await;
     }
 
-    dshot.send_command_async(Command::MotorStop).await;
+    motors.turn_off().await;
     info!("done, motors stopped");
 }
 
-// oneshot125:
+// dead oneshot125 code. dshot is better :)
 // #[cfg(feature = "test_oneshot")]
 // {
 //     let mut config = PwmConfig::default();
@@ -204,11 +214,11 @@ async fn test_dshot(
 
 // async fn test_oneshot(
 //     slice_a: Peri<'static, PWM_SLICE5>,
-//     pin_10: Peri<'static, embassy_rp::peripherals::PIN_10>,
-//     pin_11: Peri<'static, embassy_rp::peripherals::PIN_11>,
+//     pin_10: Peri<'static, MotorFl>,
+//     pin_11: Peri<'static, MotorFr>,
 //     slice_b: Peri<'static, PWM_SLICE6>,
-//     pin_12: Peri<'static, embassy_rp::peripherals::PIN_12>,
-//     pin_13: Peri<'static, embassy_rp::peripherals::PIN_13>,
+//     pin_12: Peri<'static, MotorRl>,
+//     pin_13: Peri<'static, MotorRr>,
 //     mut config: PwmConfig,
 // ) {
 //     // gpio 10/11 on pwm_slice5
