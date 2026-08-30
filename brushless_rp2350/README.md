@@ -26,10 +26,10 @@ Currently at the "runs fully off battery, all 4 motors spin via Oneshot125, EP2 
 - [x] 4 of 4 motors spin via Oneshot125 on the bench (`src/main.rs`, GPIO10/11/12/13)
 - [x] TPS63802 boost converter + EP2 wired up, whole system (RP2350 + motors) runs and arms/spins purely off battery, no USB - confirms the VSYS/power decision above works in practice
 - [x] EP2 bound to the RadioMaster Pocket (solid LED) - RF link confirmed working end to end
-- [ ] EP2/CRSF actually read and parsed in firmware, replacing `ground_control`'s WiFi/UDP link for this build - bound and powered but `main.rs` doesn't consume anything from it yet (bench-test sequence only)
-- [ ] all 4 motors + mixer (reusing `libs::mixer`)
+- [x] all 4 motors + mixer (reusing `libs::mixer`)
 - [x] IMU + fusion (reusing `libs::flight::fusion`)
 - [x] DShot via PIO
+- [ ] tune PID values
 
 ## Power
 
