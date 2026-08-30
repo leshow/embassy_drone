@@ -34,3 +34,16 @@ impl AccelBias {
         (accel - self.bias).component_div(&self.scale)
     }
 }
+
+pub const fn parse_u64(s: &str) -> u64 {
+    // unfortunately parse is not a const fn
+    let b = s.as_bytes();
+    let mut n = 0u64;
+    let mut i = 0;
+    // no for loops in const either? damn.
+    while i < b.len() {
+        n = n * 10 + (b[i] - b'0') as u64;
+        i += 1;
+    }
+    n
+}

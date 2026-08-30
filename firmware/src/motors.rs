@@ -113,12 +113,9 @@ impl<'a> Motors<'a> {
         self.rr.set_duty(0).expect("failed to set duty");
     }
 
-    // set per-motor duties independently, returns the computed hw duty values for logging
+    // set per-motor duties independently, returns the computed hw duty values for logging.
     pub fn set_motors(&self, fl: f32, fr: f32, rl: f32, rr: f32) -> (u32, u32, u32, u32) {
-        let duty = |v: f32| {
-            ((v.clamp(0., 1.) * crate::PWM_MAX_DUTY as f32) * (crate::THROTTLE_CAP as f32 / 100.))
-                as u32
-        };
+        let duty = |v: f32| (v.clamp(0., 1.) * crate::PWM_MAX_DUTY as f32) as u32;
         let duties = (duty(fl), duty(fr), duty(rl), duty(rr));
         self.fl.set_duty_hw(duties.0);
         self.fr.set_duty_hw(duties.1);

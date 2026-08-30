@@ -9,7 +9,7 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch::Watch};
 use embassy_time::Instant;
 use {defmt_rtt as _, panic_probe as _};
 
-use crate::{Irqs, RadioDma, RadioUart};
+use crate::{CtrlTx, Irqs, RadioDma, RadioUart};
 
 // latest control input radio w/ timestamp
 // watch keeps only latest value for some const num of recvers
@@ -34,7 +34,7 @@ pub async fn read_radio(
     // identical line every ~4ms even while every stick/switch is sitting still, which makes
     // it hard to tell which index moved when testing channel mapping by hand
     let mut last: Option<[u16; 16]> = None;
-    let tx = CONTROLS.sender();
+    let tx: CtrlTx = CONTROLS.sender();
 
     loop {
         // read is opportunistic so it will return immediately if there are more bytes,
@@ -58,16 +58,17 @@ pub async fn read_radio(
 // channel order: AETR (0=roll, 1=pitch, 2=throttle, 3=yaw), then AUX1-4 as SA/SB/SC/SD (4-7).
 // Sticks are configured with extended travel (measured floor ~174, right at CRSF's true protocol minimum of 172)
 // all switches, 2-position or 3-position land on that standard 191/992/1792 convention regardless.
+#[allow(unused)]
 #[derive(Clone, Copy, Debug)]
 pub struct Controls {
-    roll: f32,
-    pitch: f32,
-    throttle: f32,
-    yaw: f32,
-    armed: bool, // SA
-    sb: ThreeToggle,
-    sc: ThreeToggle,
-    sd: bool,
+    pub(crate) roll: f32,
+    pub(crate) pitch: f32,
+    pub(crate) throttle: f32,
+    pub(crate) yaw: f32,
+    pub(crate) armed: bool, // SA
+    pub(crate) sb: ThreeToggle,
+    pub(crate) sc: ThreeToggle,
+    pub(crate) sd: bool,
 }
 
 #[derive(Clone, Copy, Debug)]

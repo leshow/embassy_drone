@@ -45,24 +45,11 @@ const PWM_MAX_DUTY: u32 = (1 << PWM_BITS) - 1;
 
 static TIMER: StaticCell<timer::Timer<'static, LowSpeed>> = StaticCell::new();
 
-const fn parse_u64(s: &str) -> u64 {
-    // unfortunately parse is not a const fn
-    let b = s.as_bytes();
-    let mut n = 0u64;
-    let mut i = 0;
-    // no for loops in const either? damn.
-    while i < b.len() {
-        n = n * 10 + (b[i] - b'0') as u64;
-        i += 1;
-    }
-    n
-}
-
 /// How many loop iterations to skip between log lines.
 /// Override at build time: `LOG_RATE_MS=200 cargo flash-s3` (default: 500 ms).
 const LOG_EVERY_N: u32 = {
     let ms = match option_env!("LOG_RATE_MS") {
-        Some(s) => parse_u64(s),
+        Some(s) => libs::flight::parse_u64(s),
         None => 500,
     };
     (ms / LOOP_PERIOD_MS) as u32
@@ -72,7 +59,7 @@ const LOG_EVERY_N: u32 = {
 const THROTTLE_CAP: u8 = {
     match option_env!("THROTTLE_CAP") {
         Some(s) => {
-            let v = parse_u64(s);
+            let v = libs::flight::parse_u64(s);
             assert!(v <= 100, "THROTTLE_CAP must be 0..=100");
             v as u8
         }

@@ -800,12 +800,16 @@ pub async fn run_control(
         let pitch_torque = pitch_pid.update(pitch_rate_sp - g.y, dt);
         let yaw_torque = yaw_pid.update(yaw_rate_sp - g.z, dt);
 
+        // THROTTLE_CAP applied to the commanded throttle
+        // like betaflight's throttle_limit_type=SCALE
+        let capped_throttle = pkt_throttle * (crate::THROTTLE_CAP as f32 / 100.0);
+
         // betaflight-style two-sided desaturation - see libs::mixer for the derivation, the
         // real crash it was built to fix (a real flight log showed a motor getting silently
         // floored while a big correction was active, escalating into full saturation on
         // multiple motors)
         let (fl, fr, rl, rr) =
-            libs::mixer::mix_motors(pkt_throttle, roll_torque, pitch_torque, yaw_torque);
+            libs::mixer::mix_motors(capped_throttle, roll_torque, pitch_torque, yaw_torque);
 
         let (dfl, dfr, drl, drr) = motors.set_motors(fl, fr, rl, rr);
         pid_mix_stats.record(mix_start.elapsed().as_micros() as f32 / 1_000_000.0);

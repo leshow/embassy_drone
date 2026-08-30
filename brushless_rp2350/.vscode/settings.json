@@ -1,4 +1,4 @@
 {
-    "rust-analyzer.cargo.features": ["visualize", "test_dshot"],
+    "rust-analyzer.cargo.features": [],
     "rust-analyzer.check.allTargets": true,
 }
