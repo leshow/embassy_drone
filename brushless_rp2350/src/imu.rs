@@ -15,6 +15,7 @@ where
     I: SpiDevice,
     I::Error: defmt::Format,
 {
+    /// init sensor
     pub async fn init(spi: I) -> Result<Self, icm426xx::Error<I::Error>> {
         // 1kHz read rate
         let imu_config = Config {
@@ -25,6 +26,11 @@ where
         let driver = ICM42688::new(spi).initialize(Delay, imu_config).await?;
         info!("ICM42688 init OK, WHO_AM_I matched");
         Ok(Self { driver })
+    }
+
+    /// reset fifo queue and dump output
+    pub async fn reset_fifo(&mut self) -> Result<(), icm426xx::Error<I::Error>> {
+        self.driver.reset_fifo().await.map_err(icm426xx::Error::Bus)
     }
 }
 

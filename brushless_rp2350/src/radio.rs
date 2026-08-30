@@ -42,13 +42,15 @@ pub async fn read_radio(
         if rx.read(&mut byte).await.is_ok() {
             parser.push_bytes(&byte);
             while let Some(Ok((_addr, packet))) = parser.next_packet() {
-                if let Packet::RcChannels(channels) = packet
-                    && last != Some(channels.0)
-                {
+                if let Packet::RcChannels(channels) = packet {
+                    // publish on every valid packet to tx
                     let ctrl = Controls::from(&channels);
                     tx.send((ctrl, Instant::now()));
-                    debug!("control packet: {:?}", defmt::Debug2Format(&ctrl));
-                    last = Some(channels.0);
+                    // only print a debug if something changed
+                    if last != Some(channels.0) {
+                        debug!("control packet: {:?}", defmt::Debug2Format(&ctrl));
+                        last = Some(channels.0);
+                    }
                 }
             }
         }
