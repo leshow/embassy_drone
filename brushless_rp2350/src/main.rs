@@ -2,7 +2,7 @@
 #![no_main]
 
 use crate::radio::Controls;
-use defmt::error;
+use defmt::{error, info};
 use embassy_executor::Spawner;
 use embassy_rp::{
     bind_interrupts,
@@ -12,7 +12,7 @@ use embassy_rp::{
     uart::InterruptHandler as UartInterruptHandler,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch};
-use embassy_time::{Instant, Timer};
+use embassy_time::Instant;
 use embedded_hal_bus::spi::ExclusiveDevice;
 
 use {defmt_rtt as _, panic_probe as _};
@@ -126,9 +126,8 @@ async fn main(spawner: Spawner) {
         }
         flight::run(sensor, motors, p.PIN_6, rx).await;
     }
-    loop {
-        Timer::after_secs(60).await;
-    }
+
+    info!("main exitied.");
 }
 
 // live fusion dump

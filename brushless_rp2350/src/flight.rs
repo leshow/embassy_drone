@@ -15,7 +15,7 @@ use libs::flight::{
     sensors::ImuRead,
 };
 
-mod consts {
+mod vals {
     use libs::flight::fusion;
 
     // max roll/pitch command from stick (+/- 25 deg)
@@ -28,10 +28,7 @@ mod consts {
     pub const ANGLE_P_YAW: f32 = 0.0;
 
     // inner loop - only P is live for the first test. D and I come in one at a time, in that
-    // order, once the previous term is confirmed stable - see
-    // [[project_brushless_rp2350_bringup]] for why: isolating one term at a time means a bad
-    // first result points at something structural (gyro axis, motor mapping, mixer sign)
-    // rather than being entangled with an untested D or I term. INTEGRAL_LIMIT/LEAK below stay
+    // order, once the previous term is confirmed stable. INTEGRAL_LIMIT/LEAK below stay
     // inert while their Ki is 0 - both only ever shape the accumulator's value, and Ki=0
     // zeroes that value's contribution to the output regardless
     pub const RATE_KP_ROLL_PITCH: f32 = 0.05;
@@ -53,6 +50,9 @@ mod consts {
     // no discontinuity in commanded rate right at the edge. roll/pitch only: yaw can't wind up
     // (rate_ki_yaw = 0) and has its own heading-hold handling already
     pub const ANGLE_DEADBAND_RAD: f32 = 0.5 * fusion::DEG_TO_RAD;
+}
+
+mod util {
 
     pub(crate) fn deadband(x: f32, band: f32) -> f32 {
         if x > band {
@@ -71,36 +71,36 @@ mod consts {
         let r = libm::fmodf(a + PI, 2.0 * PI);
         (if r < 0.0 { r + 2.0 * PI } else { r }) - PI
     }
-}
 
-// running min/max/avg of loop dt between periodic log lines - lets the actual loop rate be
-// checked without needing per-tick logging
-struct DtStats {
-    min: f32,
-    max: f32,
-    sum: f32,
-    n: u32,
-}
+    // running min/max/avg of loop dt between periodic log lines - lets the actual loop rate be
+    // checked without needing per-tick logging
+    pub struct DtStats {
+        pub min: f32,
+        pub max: f32,
+        pub sum: f32,
+        pub n: u32,
+    }
 
-impl DtStats {
-    const fn new() -> Self {
-        Self {
-            min: f32::MAX,
-            max: 0.0,
-            sum: 0.0,
-            n: 0,
+    impl DtStats {
+        pub const fn new() -> Self {
+            Self {
+                min: f32::MAX,
+                max: 0.0,
+                sum: 0.0,
+                n: 0,
+            }
         }
-    }
 
-    fn record(&mut self, dt: f32) {
-        self.min = self.min.min(dt);
-        self.max = self.max.max(dt);
-        self.sum += dt;
-        self.n += 1;
-    }
+        pub fn record(&mut self, dt: f32) {
+            self.min = self.min.min(dt);
+            self.max = self.max.max(dt);
+            self.sum += dt;
+            self.n += 1;
+        }
 
-    fn avg(&self) -> f32 {
-        self.sum / self.n as f32
+        pub fn avg(&self) -> f32 {
+            self.sum / self.n as f32
+        }
     }
 }
 
@@ -117,29 +117,29 @@ pub async fn run<'a, D>(
     let mut int1 = Input::new(int1, Pull::None);
     let mut fusion = FusionBuilder::new().icm42688().madgwick().build();
     let mut last = Instant::now();
-    let mut dt_stats = DtStats::new();
+    let mut dt_stats = util::DtStats::new();
 
     // inner rate PIDs
     let mut roll_pid = Pid::new(
-        consts::RATE_KP_ROLL_PITCH,
-        consts::RATE_KI_ROLL_PITCH,
-        consts::RATE_KD_ROLL_PITCH,
-        consts::INTEGRAL_LIMIT,
-        consts::RATE_INTEGRAL_LEAK,
+        vals::RATE_KP_ROLL_PITCH,
+        vals::RATE_KI_ROLL_PITCH,
+        vals::RATE_KD_ROLL_PITCH,
+        vals::INTEGRAL_LIMIT,
+        vals::RATE_INTEGRAL_LEAK,
     );
     let mut pitch_pid = Pid::new(
-        consts::RATE_KP_ROLL_PITCH,
-        consts::RATE_KI_ROLL_PITCH,
-        consts::RATE_KD_ROLL_PITCH,
-        consts::INTEGRAL_LIMIT,
-        consts::RATE_INTEGRAL_LEAK,
+        vals::RATE_KP_ROLL_PITCH,
+        vals::RATE_KI_ROLL_PITCH,
+        vals::RATE_KD_ROLL_PITCH,
+        vals::INTEGRAL_LIMIT,
+        vals::RATE_INTEGRAL_LEAK,
     );
     let mut yaw_pid = Pid::new(
-        consts::RATE_KP_YAW,
-        consts::RATE_KI_YAW,
-        consts::RATE_KD_YAW,
-        consts::INTEGRAL_LIMIT,
-        consts::RATE_INTEGRAL_LEAK,
+        vals::RATE_KP_YAW,
+        vals::RATE_KI_YAW,
+        vals::RATE_KD_YAW,
+        vals::INTEGRAL_LIMIT,
+        vals::RATE_INTEGRAL_LEAK,
     );
 
     let mut target_yaw: f32 = 0.0;
@@ -149,9 +149,7 @@ pub async fn run<'a, D>(
     loop {
         int1.wait_for_high().await;
 
-        // no LPF or gyro-bias tracking yet (unlike the esp32-s3 project's read_fusion) - raw
-        // gyro straight into both the fusion filter and the rate PIDs below. Fine to start
-        // with; revisit if vibration/drift actually shows up as a real problem
+        // no LPF or gyro-bias tracking yet unlike esp32s3
         let (accel, gyro) = match sensor.read().await {
             Ok(sample) => sample,
             Err(e) => {
@@ -180,7 +178,7 @@ pub async fn run<'a, D>(
                 actual_pitch * RAD_TO_DEG,
                 actual_yaw * RAD_TO_DEG,
             );
-            dt_stats = DtStats::new();
+            dt_stats = util::DtStats::new();
         }
 
         // latest control input, with a staleness check for failsafe (no pkt in last 500ms)
@@ -232,20 +230,19 @@ pub async fn run<'a, D>(
         }
 
         // outer angle-P loop: stick angle -> rate setpoint
-        let target_roll = ctrl.roll * consts::MAX_TILT_RAD;
-        let target_pitch = ctrl.pitch * consts::MAX_TILT_RAD;
-        let roll_diff = consts::deadband(
-            consts::wrap_angle(target_roll - actual_roll),
-            consts::ANGLE_DEADBAND_RAD,
+        let target_roll = ctrl.roll * vals::MAX_TILT_RAD;
+        let target_pitch = ctrl.pitch * vals::MAX_TILT_RAD;
+        let roll_diff = util::deadband(
+            util::wrap_angle(target_roll - actual_roll),
+            vals::ANGLE_DEADBAND_RAD,
         );
-        let pitch_diff = consts::deadband(
-            consts::wrap_angle(target_pitch - actual_pitch),
-            consts::ANGLE_DEADBAND_RAD,
+        let pitch_diff = util::deadband(
+            util::wrap_angle(target_pitch - actual_pitch),
+            vals::ANGLE_DEADBAND_RAD,
         );
-        let roll_rate_sp = consts::ANGLE_P_ROLL_PITCH * roll_diff;
-        let pitch_rate_sp = consts::ANGLE_P_ROLL_PITCH * pitch_diff;
-        let yaw_rate_sp =
-            consts::ANGLE_P_YAW * consts::wrap_angle(target_yaw - actual_yaw) + yaw_ff;
+        let roll_rate_sp = vals::ANGLE_P_ROLL_PITCH * roll_diff;
+        let pitch_rate_sp = vals::ANGLE_P_ROLL_PITCH * pitch_diff;
+        let yaw_rate_sp = vals::ANGLE_P_YAW * util::wrap_angle(target_yaw - actual_yaw) + yaw_ff;
 
         // inner rate PID: rate setpoint vs actual gyro rate -> torque
         let roll_torque = roll_pid.update(roll_rate_sp - gyro.x, dt);
