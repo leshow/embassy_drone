@@ -26,7 +26,9 @@ embassy-dshot = { version = "0.3", features = ["rp2350", "defmt"] }
 embassy-sync = "0.8.0"
 
 defmt = "1"
-defmt-rtt = "1"
+# disable-blocking-mode: probe-rs puts RTT into blocking mode by default, so a print blocks the
+# target until the host drains the buffer. this will stall the flight loop
+defmt-rtt = { version = "1", features = ["disable-blocking-mode"] }
 crsf = "2"
 cortex-m = { version = "0.7", features = ["inline-asm"] }
 cortex-m-rt = "0.7"

@@ -1,5 +1,7 @@
-use crsf::{Packet, PacketParser, RcChannels};
-use defmt::debug;
+use crsf::{
+    MAX_PACKET_LENGTH, PACKET_HEADER_LENGTH, Packet, PacketError, PacketParser, RcChannels,
+};
+use defmt::{trace, warn};
 use embassy_rp::{
     Peri,
     peripherals::PIN_1,
@@ -28,32 +30,76 @@ pub async fn read_radio(
 
     let mut rx = UartRx::new(uart, rx_pin, Irqs, dma, uart_config);
     let mut parser = PacketParser::<64>::new();
-    // read only 1 byte at a time since csrf is variable width packets (up to 64 len)
-    let mut byte = [0u8; 1];
-    // only log when a channel value actually changes - otherwise this floods with an
-    // identical line every ~4ms even while every stick/switch is sitting still, which makes
-    // it hard to tell which index moved when testing channel mapping by hand
+    // only log when a channel value actually changes
     let mut last: Option<[u16; 16]> = None;
     let tx: CtrlTx = CONTROLS.sender();
 
+    // legal body lengths: type + crc at minimum, whatever fits after the header at most
+    const LEN_MIN: usize = 2;
+    const LEN_MAX: usize = MAX_PACKET_LENGTH - PACKET_HEADER_LENGTH;
+
+    let mut header = [0u8; PACKET_HEADER_LENGTH];
+    let mut body_buf = [0u8; MAX_PACKET_LENGTH];
+    let mut byte = [0u8; 1];
+
+    // are we aligned on our reads
+    let mut aligned = false;
+
+    // INVARIANT: at most one frame is pushed into the parser per iteration, and always drained
+    // before the next read. push_bytes silently drops when its buffer is full and
+    // next_raw_packet pops up to MAX_PACKET_LENGTH per extraction, so letting frames pile up
+    // would quietly lose bytes
     loop {
-        // read is opportunistic so it will return immediately if there are more bytes,
-        // should be fine to read 1 at a time
-        if rx.read(&mut byte).await.is_ok() {
-            parser.push_bytes(&byte);
-            while let Some(Ok((_addr, packet))) = parser.next_packet() {
-                if let Packet::RcChannels(channels) = packet {
-                    // publish on every valid packet to tx
-                    let ctrl = Controls::from(&channels);
-                    tx.send((ctrl, Instant::now()));
-                    // only print a debug if something changed
-                    if last != Some(channels.0) {
-                        debug!("control packet: {:?}", defmt::Debug2Format(&ctrl));
-                        last = Some(channels.0);
+        if aligned {
+            // a crsf frame is [addr][len][type + payload + crc]
+            if rx.read(&mut header).await.is_ok() {
+                let len = header[1] as usize;
+                if (LEN_MIN..=LEN_MAX).contains(&len) {
+                    let body = &mut body_buf[..len];
+                    if rx.read(body).await.is_ok() {
+                        parser.push_bytes(&header);
+                        parser.push_bytes(body);
                     }
+                } else {
+                    // a length this can't be means bytes went missing
+                    // push what we read, the parser needs an unbroken stream to resync on...
+                    // next_packet below then comes up empty and we'll hit the single byte read case
+                    parser.push_bytes(&header);
                 }
             }
+        } else {
+            // one byte at a time until a frame parses again
+            if rx.read(&mut byte).await.is_ok() {
+                parser.push_bytes(&byte);
+            }
         }
+
+        let mut framed = false;
+        while let Some(res) = parser.next_packet() {
+            match res {
+                Ok((_addr, packet)) => {
+                    framed = true;
+                    if let Packet::RcChannels(channels) = packet {
+                        // publish on every valid packet to tx
+                        let ctrl = Controls::from(&channels);
+                        tx.send((ctrl, Instant::now()));
+                        // only print a debug if something changed
+                        if last != Some(channels.0) {
+                            trace!("control packet: {:?}", defmt::Debug2Format(&ctrl));
+                            last = Some(channels.0);
+                        }
+                    }
+                }
+                // correct packet but just one we dont handle
+                Err(PacketError::UnknownType { .. }) => framed = true,
+                Err(_) => {}
+            }
+        }
+
+        if aligned && !framed {
+            warn!("crsf: lost frame alignment, falling back to byte scan");
+        }
+        aligned = framed;
     }
 }
 

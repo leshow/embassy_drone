@@ -3,10 +3,11 @@
 
 use crate::radio::Controls;
 use defmt::{error, info};
-use embassy_executor::Spawner;
+use embassy_executor::{Executor, Spawner};
 use embassy_rp::{
     bind_interrupts,
     gpio::{Level, Output},
+    multicore::Stack,
     peripherals::PIO0,
     spi::{Config as SpiConfig, Spi},
     uart::InterruptHandler as UartInterruptHandler,
@@ -14,6 +15,24 @@ use embassy_rp::{
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch};
 use embassy_time::Instant;
 use embedded_hal_bus::spi::ExclusiveDevice;
+
+// only the feature-gated bench/visualize paths below need these - keeping them cfg'd off the
+// normal build avoids unused-import warnings there
+#[cfg(any(feature = "visualize", feature = "test_dshot"))]
+use embassy_rp::Peri;
+#[cfg(feature = "visualize")]
+use embassy_rp::{
+    gpio::{Input, Pull},
+    peripherals::PIN_6,
+};
+#[cfg(feature = "test_dshot")]
+use embassy_time::Timer;
+#[cfg(feature = "visualize")]
+use libs::flight::{
+    fusion::{FusionBuilder, RAD_TO_DEG},
+    sensors::ImuRead,
+};
+use static_cell::StaticCell;
 
 use {defmt_rtt as _, panic_probe as _};
 
@@ -66,11 +85,12 @@ const THROTTLE_CAP: u8 = {
     }
 };
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    let p = embassy_rp::init(Default::default());
+static mut CORE1_STACK: Stack<4096> = Stack::new();
+static EX1: StaticCell<Executor> = StaticCell::new();
 
-    spawner.spawn(radio::read_radio(p.UART0, p.PIN_1, p.DMA_CH0).unwrap());
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let p = embassy_rp::init(Default::default());
 
     #[cfg(feature = "test_dshot")]
     test_dshot(p.PIO0, p.PIN_10, p.PIN_11, p.PIN_12, p.PIN_13).await;
@@ -99,6 +119,23 @@ async fn main(spawner: Spawner) {
     #[cfg(not(any(feature = "visualize", feature = "test_dshot")))]
     {
         use crate::{imu::Sensor, radio::CONTROLS};
+
+        // radio gets core1 to itself - it's the chattiest task here (~250 frames/sec), and this
+        // keeps its uart/dma work off the core running the 1kHz control loop
+        embassy_rp::multicore::spawn_core1(
+            p.CORE1,
+            unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+            move || {
+                let ex = EX1.init(Executor::new());
+                ex.run(|spawner| {
+                    spawner.spawn(
+                        radio::read_radio(p.UART0, p.PIN_1, p.DMA_CH0)
+                            .expect("failed to run radio"),
+                    );
+                });
+            },
+        );
+
         let mut spi_config = SpiConfig::default();
         spi_config.frequency = 3_000_000;
         let spi_bus = Spi::new(

@@ -8,7 +8,10 @@ use crate::{Irqs, MotorFl, MotorFr, MotorRl, MotorRr};
 // DShot throttle range is 0-1999 (embassy-dshot's own 0-based abstraction over the raw
 // 48-2047 DShot wire values). THROTTLE_MIN is already the lowest valid *spin* value, not
 // "off" - the motor may still creep at it. Command::MotorStop (see turn_off) is the real "off"
-const THROTTLE_MIN: u16 = 0;
+// ~5% idle floor, matching betaflight's dshot_idle_value. set_motors rescales [0,1] onto
+// [MIN,MAX] rather than clamping, so the mixer keeps all its relative authority - it just can't
+// command a literal stop while armed.
+const THROTTLE_MIN: u16 = 100;
 const THROTTLE_MAX: u16 = 1999;
 
 pub struct Motors<'a> {

@@ -10,10 +10,12 @@ use embassy_time::{Duration, Instant};
 use {defmt_rtt as _, panic_probe as _};
 
 use libs::flight::{
+    filters,
     fusion::{FusionBuilder, RAD_TO_DEG},
     pid::Pid,
     sensors::ImuRead,
 };
+use nalgebra::Vector3;
 
 mod vals {
     use libs::flight::fusion;
@@ -22,7 +24,7 @@ mod vals {
     pub const MAX_TILT_RAD: f32 = 25.0 * fusion::DEG_TO_RAD;
 
     // outer loop p gains
-    pub const ANGLE_P_ROLL_PITCH: f32 = 4.0;
+    pub const ANGLE_P_ROLL_PITCH: f32 = 2.0;
     // and angle_p_yaw means the controller will eventually torque
     // quad to chase drift
     pub const ANGLE_P_YAW: f32 = 0.0;
@@ -35,7 +37,7 @@ mod vals {
     pub const RATE_KI_ROLL_PITCH: f32 = 0.0; // was 0.3
     pub const RATE_KD_ROLL_PITCH: f32 = 0.0; // was 0.001
 
-    pub const RATE_KP_YAW: f32 = 0.3; // flix 0.3 was set to 0.2
+    pub const RATE_KP_YAW: f32 = 0.0; // flix 0.3 was set to 0.2
     pub const RATE_KI_YAW: f32 = 0.0; // was 0.05
     pub const RATE_KD_YAW: f32 = 0.0; // was 0.001
 
@@ -118,6 +120,12 @@ pub async fn run<'a, D>(
     let mut fusion = FusionBuilder::new().icm42688().madgwick().build();
     let mut last = Instant::now();
     let mut dt_stats = util::DtStats::new();
+    let mut accel_filter = filters::Lpf3::new_two_pole(filters::ACCEL_LPF_HZ);
+    // TODO: delete me
+    // norm of every accel sample over a log window, plus how many the health gate threw out.
+    // this is the measurement that says whether vibration is actually reaching the estimator
+    let mut accel_stats = util::DtStats::new();
+    let mut accel_rejects: u32 = 0;
 
     // inner rate PIDs
     let mut roll_pid = Pid::new(
@@ -149,7 +157,7 @@ pub async fn run<'a, D>(
     loop {
         int1.wait_for_high().await;
 
-        // no LPF or gyro-bias tracking yet unlike esp32s3
+        // gyro still goes in raw - no LPF or bias tracking on it yet unlike esp32s3
         let (accel, gyro) = match sensor.read().await {
             Ok(sample) => sample,
             Err(e) => {
@@ -163,22 +171,48 @@ pub async fn run<'a, D>(
         last = now;
         dt_stats.record(dt);
 
-        let quat = fusion.update(dt, accel, gyro);
+        // the chip's anti-alias filter is set to 1/2 the imu ODR (currently 1khz)
+        // everything below that arrives unfiltered
+        // madgwick uses accel as its gravity reference, so a corrupted sample tilts the estimate
+        // and the angle loop below then chases it with real motor output
+        let accel = accel_filter.update(accel, dt);
+        let accel_norm = accel.norm();
+        accel_stats.record(accel_norm);
+
+        // outside this band the reading isn't gravity, it's vibration or motion, so its direction
+        // can't be trusted as "down" no matter how smooth it is. feeding zeros makes madgwick
+        // treat it as "no accel this tick" and coast on gyro integration instead of being pulled
+        // by a bad reference
+        let accel_for_fusion =
+            if (filters::ACCEL_HEALTHY_MIN..=filters::ACCEL_HEALTHY_MAX).contains(&accel_norm) {
+                accel
+            } else {
+                accel_rejects += 1;
+                Vector3::zeros()
+            };
+
+        let quat = fusion.update(dt, accel_for_fusion, gyro);
         let (actual_roll, actual_pitch, actual_yaw) = quat.euler_angles();
 
         log_count += 1;
         if log_count >= crate::LOG_EVERY_N {
             log_count = 0;
             debug!(
-                "loop dt min: {} max: {} avg: {} | roll: {}\u{b0} pitch: {}\u{b0} yaw: {}\u{b0}",
+                "loop dt min: {} max: {} avg: {} | roll: {}\u{b0} pitch: {}\u{b0} yaw: {}\u{b0} | accel g min: {} max: {} avg: {} rejects: {}",
                 dt_stats.min,
                 dt_stats.max,
                 dt_stats.avg(),
                 actual_roll * RAD_TO_DEG,
                 actual_pitch * RAD_TO_DEG,
                 actual_yaw * RAD_TO_DEG,
+                accel_stats.min,
+                accel_stats.max,
+                accel_stats.avg(),
+                accel_rejects,
             );
             dt_stats = util::DtStats::new();
+            accel_stats = util::DtStats::new();
+            accel_rejects = 0;
         }
 
         // latest control input, with a staleness check for failsafe (no pkt in last 500ms)
@@ -224,6 +258,10 @@ pub async fn run<'a, D>(
             0.0
         };
 
+        // TODO: this is like betaflight's MOTOR_STOP, off by default
+        // a stick dip below 5% mid-flight kills all attitude authority
+        // dropping this early return would let
+        // THROTTLE_MIN idle the motors from arm instead. means armed always = spinning
         if ctrl.throttle < 0.05 {
             motors.turn_off().await;
             continue;
