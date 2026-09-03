@@ -24,9 +24,12 @@ flash-s3-fusion = "run -p embassy_quad --release --target xtensa-esp32s3-none-el
 ground_control = "build --manifest-path ground_control/Cargo.toml --target x86_64-unknown-linux-gnu"
 gc = "run --release --manifest-path ground_control/Cargo.toml --target x86_64-unknown-linux-gnu"
 visualize = "build --manifest-path visualizer/Cargo.toml --target x86_64-unknown-linux-gnu"
-erase-flash = "!espflash erase-region 0x10000 0x300000"
-# clears persisted accel calibration back to "uncalibrated" - see firmware/src/calibration_storage.rs
-erase-calibration = "!espflash erase-region 0x9000 0x6000"
+
+# erase-flash/erase-calibration used to live here as aliases, but cargo aliases can only
+# dispatch to another cargo command, never to an arbitrary external command like espflash -
+# "!espflash ..." looked like it worked (matches git's alias syntax) but actually just failed
+# with "no such command: `!espflash`" every time it ran, confirmed empirically. Real versions
+# are scripts/erase-flash.sh and scripts/erase-calibration.sh now.
 
 [env]
 DEFMT_LOG = "info"
