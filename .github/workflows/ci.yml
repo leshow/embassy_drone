@@ -18,7 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      # check all three workspaces
+      # check the three stable-toolchain workspaces (brushless_rp2350 has its own job)
       - run: cargo fmt --all -- --check
       - run: cargo fmt --all --manifest-path ground_control/Cargo.toml -- --check
       - run: cargo fmt --all --manifest-path visualizer/Cargo.toml -- --check
@@ -92,6 +92,30 @@ jobs:
           buildtargets: esp32s3
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -p embassy_quad --target xtensa-esp32s3-none-elf -Z build-std=core,alloc --no-default-features --features ${{ matrix.features }} -- -D warnings
+
+  brushless-rp2350:
+    name: Check brushless_rp2350
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # its own workspace (excluded from the root one) on stable + thumbv8m, matching
+      # brushless_rp2350/rust-toolchain.toml - not the esp channel the root pins
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv8m.main-none-eabihf
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: brushless_rp2350
+      # working-directory, not --manifest-path like the jobs below: cargo reads
+      # .cargo/config.toml relative to the cwd, and brushless_rp2350's is what sets
+      # [build] target. from the root this no_std crate would build for x86 and fail
+      - run: cargo fmt --all -- --check
+        working-directory: brushless_rp2350
+      # no --all-targets - it pulls in the test harness, which needs the `test` crate
+      # and doesn't exist for a no_std target
+      - run: cargo clippy -- -D warnings
+        working-directory: brushless_rp2350
 
   check-ground-control:
     name: Check ground_control

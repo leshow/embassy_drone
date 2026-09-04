@@ -176,22 +176,23 @@ pub async fn run<'a, D>(
         // madgwick uses accel as its gravity reference, so a corrupted sample tilts the estimate
         // and the angle loop below then chases it with real motor output
         let accel = accel_filter.update(accel, dt);
-        let accel_norm = accel.norm();
-        accel_stats.record(accel_norm);
 
         // outside this band the reading isn't gravity, it's vibration or motion, so its direction
         // can't be trusted as "down" no matter how smooth it is. feeding zeros makes madgwick
         // treat it as "no accel this tick" and coast on gyro integration instead of being pulled
         // by a bad reference
-        let accel_for_fusion =
-            if (filters::ACCEL_HEALTHY_MIN..=filters::ACCEL_HEALTHY_MAX).contains(&accel_norm) {
-                accel
-            } else {
-                accel_rejects += 1;
-                Vector3::zeros()
-            };
+        let accel = if (filters::ACCEL_HEALTHY_MIN..=filters::ACCEL_HEALTHY_MAX).contains(&{
+            let accel_norm = accel.norm();
+            accel_stats.record(accel_norm);
+            accel_norm
+        }) {
+            accel
+        } else {
+            accel_rejects += 1;
+            Vector3::zeros()
+        };
 
-        let quat = fusion.update(dt, accel_for_fusion, gyro);
+        let quat = fusion.update(dt, accel, gyro);
         let (actual_roll, actual_pitch, actual_yaw) = quat.euler_angles();
 
         log_count += 1;

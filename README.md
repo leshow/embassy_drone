@@ -52,18 +52,18 @@ rationale.
 | Propeller              | 4   | 55 or 65mm                                    |
 | 3D printed frame       | 1   | STL/3MF files in `stl/` - designed in OnShape |
 
-Requires [espflash](https://github.com/esp-rs/espflash) for flashing (`cargo install espflash`).
-
 \*I tried with a 503040 3.7v lipo recycled from a keyboard build but the BMS (battery management system) on it will automatically shut off after a few seconds. It's not really build to power these motors.
 
 ### ESP32-S3 (default)
 
-Needs the Xtensa toolchain, not plain `rustup`:
+Needs the Xtensa toolchain, not plain `rustup`, plus [espflash](https://github.com/esp-rs/espflash) to flash and erase:
 
 ```sh
 cargo install espup
 espup install
 # then source the exports it prints (or ~/export-esp.sh) before building
+
+cargo install espflash
 ```
 
 ```sh
@@ -79,6 +79,17 @@ cargo flash-s3
 ```
 
 See .cargo/config.toml to see expansion of aliases
+
+### Erase helpers
+
+Two scripts in `scripts/` wrap `espflash erase-region` for the regions that come up most:
+
+```sh
+./scripts/erase-flash.sh        # wipes the app region (0x300000 bytes at 0x10000)
+./scripts/erase-calibration.sh  # clears the nvs partition (0x6000 at 0x9000)
+```
+
+`erase-calibration` puts the accel back to "uncalibrated" by clearing partition table's `nvs`
 
 ### Log level
 

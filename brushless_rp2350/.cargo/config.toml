@@ -17,13 +17,13 @@ rustflags = ["-C", "target-cpu=cortex-m33"]
 [alias]
 # same as plain `cargo run --release` - spelled out for symmetry with flash-probe
 flash-usb = "run --release"
-# use pi debug probe: need to connect SWD|SWCLK|SWDIO and it will flash + stream defmt over RTT instead of BOOTSEL/UF2.
-# array form, not a plain string - cargo whitespace-splits plain alias strings into
-# separate args, which would break the quoted runner value apart; array elements are
-# passed through as single tokens instead. (the "!shell-command" alias form doesn't
-# actually exist in cargo - that was wrong, same bug is in the root .cargo/config.toml's
-# erase-flash/erase-calibration aliases too, untested until now)
-flash-probe = ["run", "--release", "--config", "target.thumbv8m.main-none-eabihf.runner=\"probe-rs run --chip RP235x --protocol swd\""]
+# use pi debug probe: need to connect SWD|SWCLK|SWDIO and it will flash + stream defmt over RTT instead of BOOTSEL/UF2
+flash-probe = [
+	"run",
+	"--release",
+	"--config",
+	"target.thumbv8m.main-none-eabihf.runner=\"probe-rs run --chip RP235x --protocol swd\"",
+]
 
 [env]
 DEFMT_LOG = "info"
