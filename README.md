@@ -1,6 +1,6 @@
 # mini quadcopter in Rust w/ embassy for esp32 and rp2350 (WIP)
 
-currently still a work in progress, building a (very) mini quadcopter for esp32 on bare metal with [embassy.dev](https://embassy.dev). running on the esp32-s3 - the extra core lets the flight loop and WiFi run fully independently, and the hardware FPU matters a lot for the fusion/filter math (see `docs/s3-migration.md`).
+currently still a work in progress, building a (very) mini quadcopter for esp32 on bare metal with [embassy.dev](https://embassy.dev). running on the esp32-s3 - the extra core lets the flight loop and WiFi run fully independently, and the hardware FPU matters a lot for the fusion/filter math.
 
 ## rp2350 brushless version
 
@@ -28,8 +28,7 @@ I've printed in PLA, PETG and PETG-CF & GF. PLA seems totally fine, the drone fr
 
 S3-only - the earlier C3/C6 (RISC-V) builds were dropped in favor of the
 S3's hardware FPU and second core. Needs the Xtensa toolchain (`espup`),
-not plain `rustup` - see `docs/s3-migration.md` for the full writeup and
-rationale.
+not plain `rustup` - see the ESP32-S3 section below for setup.
 
 | Part     | Chip     | Cores  | Flash | RAM        | WiFi    | Notes                      |
 | -------- | -------- | ------ | ----- | ---------- | ------- | -------------------------- |

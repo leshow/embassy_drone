@@ -100,7 +100,9 @@ pub(crate) type Sensor20948<'a> = Sensor<
 >;
 
 // runs on core 1: everything WiFi-related. Kept off core 0 so the flight loop never competes
-// with WiFi/UDP tasks for time on a shared executor - see docs/s3-migration.md "Dual executor"
+// with WiFi/UDP tasks for time on a shared executor. measured on the old single-core c3:
+// disabling the wifi spawn entirely dropped i2c read from ~1.12ms to ~979us avg, a dedicated
+// core buys the same isolation without giving up wifi
 #[cfg(not(feature = "visualize"))]
 #[embassy_executor::task]
 async fn wifi_core_task(wifi: esp_hal::peripherals::WIFI<'static>, spawner: Spawner) {
